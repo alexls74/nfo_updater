@@ -207,6 +207,19 @@ func fromRaw(raw map[string]string) *Config {
 	}
 }
 
+// EnabledRatings — какие источники рейтингов включены пользователем.
+// Ключи совпадают с nfo.KnownRatingSources().
+func (c *Config) EnabledRatings() map[string]bool {
+	return map[string]bool{
+		"imdb":       c.IMDbRating,
+		"tmdb":       c.TMDbRating,
+		"trakt":      c.TraktRating,
+		"tomatoes":   c.TomatoesRating,
+		"popcorn":    c.PopcornRating,
+		"metacritic": c.MetacriticRating,
+	}
+}
+
 func readEnvFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -417,6 +430,59 @@ func isDigits(s string) bool {
 	return true
 }
 
+// validateRatings проверяет набор включённых рейтингов и выбор главного.
+//
+// Проверка "DEFAULT_RATING включён" нужна потому, что иначе несоответствие
+// проявляется только в логе: ChooseDefaultRating молча уйдёт на следующий
+// доступный источник и напишет [DEFAULT_RATING_OVERRIDE] для КАЖДОГО файла
+// библиотеки. Формально это рабочее поведение, но пользователь получит
+// тысячи строк вместо одной внятной ошибки при старте.
+func (c *Config) validateRatings() error {
+	valid := nfo.KnownRatingSources()
+	known := false
+	for _, v := range valid {
+		if c.DefaultRating == v {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return fmt.Errorf("invalid DEFAULT_RATING %q: must be one of %s", c.DefaultRating, strings.Join(valid, ", "))
+	}
+
+	enabled := c.EnabledRatings()
+
+	// Отдельным сообщением: при пустом наборе жалоба на DEFAULT_RATING
+	// увела бы пользователя не туда.
+	any := false
+	for _, on := range enabled {
+		if on {
+			any = true
+			break
+		}
+	}
+	if !any {
+		return fmt.Errorf("no rating providers are enabled: set at least one of %s to yes",
+			strings.Join(upperRatingOptions(valid), ", "))
+	}
+
+	if !enabled[c.DefaultRating] {
+		return fmt.Errorf("DEFAULT_RATING is %q, but that provider is disabled: "+
+			"either enable it or pick one of the enabled providers", c.DefaultRating)
+	}
+	return nil
+}
+
+// upperRatingOptions превращает ключи источников в имена параметров конфига,
+// чтобы в сообщении об ошибке стояло IMDB_RATING, а не imdb.
+func upperRatingOptions(sources []string) []string {
+	out := make([]string, 0, len(sources))
+	for _, s := range sources {
+		out = append(out, strings.ToUpper(s)+"_RATING")
+	}
+	return out
+}
+
 // Validate проверяет конфиг целиком. Вызывается из Load(), из --check-config
 // и при SIGHUP-reload. Ожидает уже нормализованные пути (см. normalizePaths).
 func (c *Config) Validate() error {
@@ -453,16 +519,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("%w, missing: %s", ErrMissingAPIKeys, strings.Join(missing, ", "))
 	}
 
-	valid := nfo.KnownRatingSources()
-	known := false
-	for _, v := range valid {
-		if c.DefaultRating == v {
-			known = true
-			break
-		}
-	}
-	if !known {
-		return fmt.Errorf("invalid DEFAULT_RATING %q: must be one of %s", c.DefaultRating, strings.Join(valid, ", "))
+	if err := c.validateRatings(); err != nil {
+		return err
 	}
 
 	if err := c.validateMediaServers(); err != nil {

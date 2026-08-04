@@ -24,7 +24,7 @@ const cacheTTL = 24 * time.Hour
 type Deps struct {
 	Config    *config.Config
 	DB        *db.DB
-	Providers []providers.Provider // порядок важен: см. fetchRatings — сначала MDBList (дешевле), потом остальные
+	Providers []providers.Provider // порядок важен: см. NewDeps — сначала MDBList (дешевле), потом остальные
 	TMDb      *providers.TMDbProvider
 	Breaker   *providers.CircuitBreaker
 	Logger    *logging.Logger
@@ -47,8 +47,8 @@ func enabledSources(cfg *config.Config) map[string]bool {
 // ProcessMovieFile обрабатывает один .nfo фильма целиком.
 func ProcessMovieFile(ctx context.Context, deps *Deps, path string) error {
 	// Проверка прав ДО чтения и до любых сетевых запросов: файл, который
-	// мы не сможем перезаписать, не стоит ни запроса к API, ни места
-	// в статистике обработанных.
+	// мы всё равно не сможем перезаписать, не стоит ни запроса к API,
+	// ни места в статистике обработанных.
 	if err := checkWritableFile(path); err != nil {
 		deps.Stats.IncNoAccess()
 		deps.Logger.Event("[NO_ACCESS] %s: %v, skipped", path, err)
@@ -86,25 +86,33 @@ func ProcessMovieFile(ctx context.Context, deps *Deps, path string) error {
 			newContent, ratingsChanged = nfo.EnsureEmptyUserRating(newContent)
 		} else {
 			_ = deps.DB.ClearPending(imdbID, tmdbID, "")
-			entries := make([]nfo.RatingEntry, 0, len(combined))
+
+			fetched := make([]nfo.RatingEntry, 0, len(combined))
 			for source, v := range combined {
-				entries = append(entries, nfo.RatingEntry{Source: source, Value: v.Value, Votes: v.Votes})
+				fetched = append(fetched, nfo.RatingEntry{Source: source, Value: v.Value, Votes: v.Votes})
 			}
+
+			// Слияние со старым блоком: рейтинги, которые в этом прогоне
+			// получить не удалось, сохраняют прежние значения, а записи
+			// чужих инструментов переносятся дословно. Порядок задаёт
+			// MergeRatings — обход combined по map даёт случайный порядок
+			// и заставил бы переписывать файл на каждом прогоне.
+			entries := nfo.MergeRatings(fetched, nfo.ParseRatingsBlock(newContent), enabledSources(deps.Config))
+
 			sel := nfo.ChooseDefaultRating(entries, deps.Config.DefaultRating)
 			if sel.Overridden {
 				deps.Stats.IncDefaultOverridden()
 				deps.Logger.Event("[DEFAULT_RATING_OVERRIDE] %s: %s", path, sel.Reason)
 			}
-			for i := range entries {
-				entries[i].Default = entries[i].Source == sel.Source
-			}
-			block, err := nfo.BuildRatingsBlock(entries, nfo.DetectIndent(newContent))
-			if err != nil {
+			nfo.SetDefaultRating(entries, sel.Source)
+
+			var buildErr error
+			newContent, ratingsChanged, buildErr = nfo.ApplyRatingEntries(newContent, entries)
+			if buildErr != nil {
 				deps.Stats.IncError()
-				deps.Logger.Event("[ERROR] %s: build ratings block: %v", path, err)
-				return err
+				deps.Logger.Event("[ERROR] %s: build ratings block: %v", path, buildErr)
+				return buildErr
 			}
-			newContent, ratingsChanged = nfo.ApplyRatings(newContent, block)
 
 			for source, v := range fresh {
 				_ = deps.DB.UpsertRating(imdbID, tmdbID, "", source, v.Value, v.Votes)
@@ -157,7 +165,14 @@ func cachedRatings(deps *Deps, ids providers.IDs) (map[string]db.Rating, bool) {
 }
 
 // coversWanted сообщает, покрывает ли кэш ВСЕ включённые в конфиге источники.
-// Требование именно полного покрытия защищает от ситуации "пользователь
+//
+// Покрытием считается и негативная пометка (Found == false): "мы уже
+// спрашивали, этого рейтинга у провайдеров нет" — такой же законченный
+// ответ, как и само значение. Без этого гейт не срабатывал бы никогда для
+// тайтлов, у которых какого-то источника не существует в принципе (скажем,
+// нет Metacritic у старого фильма), и мы ходили бы за ним в сеть вечно.
+//
+// Требование полного покрытия заодно защищает от ситуации "пользователь
 // включил новый источник": частичного кэша достаточно для заполнения дыр,
 // но не для того, чтобы пропустить поход к провайдерам.
 func coversWanted(cached map[string]db.Rating, wanted map[string]bool) bool {
@@ -165,22 +180,47 @@ func coversWanted(cached map[string]db.Rating, wanted map[string]bool) bool {
 		if !on {
 			continue
 		}
-		if r, ok := cached[source]; !ok || r.Value == "" {
+		r, ok := cached[source]
+		if !ok {
+			return false
+		}
+		if r.Found && r.Value == "" {
 			return false
 		}
 	}
 	return true
 }
 
+// recordMissing ставит негативные пометки на источники, которых провайдеры
+// не дали. Вызывается ТОЛЬКО после результативного опроса (см. conclusive
+// в fetchRatingsWithFallback) и ДО добора значений из кэша — иначе значение
+// из кэша выглядело бы как ответ провайдера.
+//
+// Реально существующее в кэше значение негативной пометкой не затирается:
+// провайдер мог отдать неполный ответ, и терять из-за этого ранее
+// полученный рейтинг незачем.
+func recordMissing(deps *Deps, ids providers.IDs, wanted map[string]bool, combined providers.FetchResult, cached map[string]db.Rating) {
+	for source, on := range wanted {
+		if !on || combined[source].Value != "" {
+			continue
+		}
+		if r, ok := cached[source]; ok && r.Found && r.Value != "" {
+			continue
+		}
+		_ = deps.DB.UpsertMissingRating(ids.IMDb, ids.TMDb, ids.TVDb, source)
+	}
+}
+
 // fetchRatingsWithFallback собирает значения для включённых в конфиге
 // источников. Порядок действий:
 //
-//  1. Кэш-гейт: если в кэше есть ВСЕ нужные источники и он свежее cacheTTL —
-//     возвращаем его и не делаем ни одного сетевого запроса. Это главный
-//     механизм экономии квоты: повторный прогон в тот же день практически
-//     бесплатен.
+//  1. Кэш-гейт: если в кэше есть ВСЕ нужные источники (значением или
+//     негативной пометкой) и он свежее cacheTTL — возвращаем его и не делаем
+//     ни одного сетевого запроса. Это главный механизм экономии квоты:
+//     повторный прогон в тот же день практически бесплатен.
 //  2. Иначе обходим провайдеров по порядку.
-//  3. Оставшиеся дыры добираем из того же (уже загруженного) кэша,
+//  3. Если опрос получился результативным — помечаем ненайденное.
+//  4. Оставшиеся дыры добираем из того же (уже загруженного) кэша,
 //     независимо от его возраста: устаревшее значение лучше пустого.
 //
 // Возвращает ДВА набора:
@@ -201,7 +241,9 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 			if !on {
 				continue
 			}
-			combined[source] = providers.RatingValue{Value: cached[source].Value, Votes: cached[source].Votes}
+			if r := cached[source]; r.Found && r.Value != "" {
+				combined[source] = providers.RatingValue{Value: r.Value, Votes: r.Votes}
+			}
 		}
 		deps.Stats.IncFromCache()
 		deps.Logger.Detail("[CACHE_HIT] all requested sources are cached and fresh, skipping providers")
@@ -217,17 +259,30 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 		return false
 	}
 
+	// conclusive — опрос прошёл без помех: никого не отключил circuit
+	// breaker, ни у кого не кончилась квота, никто не отвалился по сети.
+	// answered — хотя бы один провайдер реально ответил. Негативные пометки
+	// ставим только при обоих условиях: иначе временный сбой был бы записан
+	// как "рейтинга не существует".
+	conclusive := true
+	answered := false
+
 	for _, p := range deps.Providers {
 		if !remaining() {
 			break
 		}
-		if !deps.Breaker.Allowed(p.Name()) || !p.Supports(ids, mediaType) {
+		if !p.Supports(ids, mediaType) {
+			continue
+		}
+		if !deps.Breaker.Allowed(p.Name()) {
+			conclusive = false
 			continue
 		}
 
 		res, err := p.FetchRatings(ctx, ids, mediaType)
 		switch {
 		case err == nil:
+			answered = true
 			deps.Breaker.RecordSuccess(p.Name())
 			deps.Stats.IncProviderRequest(p.Name())
 			for source, v := range res {
@@ -237,9 +292,11 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 				}
 			}
 		case err == providers.ErrNotFound:
+			answered = true
 			deps.Breaker.RecordSuccess(p.Name())
 			deps.Stats.IncProviderRequest(p.Name())
 		case err == providers.ErrQuotaExhausted:
+			conclusive = false
 			if !deps.quotaWarned[p.Name()] {
 				deps.quotaWarned[p.Name()] = true
 				deps.Logger.Event("[QUOTA_EXHAUSTED] %s: daily quota exhausted, falling back to cached values for the rest of this run", p.Name())
@@ -247,6 +304,7 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 		case err == providers.ErrUnsupportedID:
 			// этот провайдер просто не годится для данной комбинации ID, не сбой
 		case providers.IsNetworkError(err):
+			conclusive = false
 			tripped := deps.Breaker.RecordNetworkFailure(p.Name())
 			if tripped {
 				deps.Logger.Event("[PROVIDER_DOWN] %s: tripped after repeated network failures, disabled for the rest of this run", p.Name())
@@ -255,8 +313,15 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 		}
 	}
 
+	if conclusive && answered {
+		recordMissing(deps, ids, wanted, combined, cached)
+	}
+
 	if remaining() {
 		for source, r := range cached {
+			if !r.Found || r.Value == "" {
+				continue
+			}
 			if wanted[source] && combined[source].Value == "" {
 				combined[source] = providers.RatingValue{Value: r.Value, Votes: r.Votes}
 				deps.Logger.Detail("[FROM_CACHE] %s: %s (cached %s)", source, r.Value, r.UpdatedAt.Format(time.RFC3339))

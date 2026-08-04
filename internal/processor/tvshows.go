@@ -140,26 +140,31 @@ func processShowNFO(ctx context.Context, deps *Deps, path string) (providers.IDs
 		changed = changed || c
 	} else {
 		_ = deps.DB.ClearPending(imdbID, tmdbID, tvdbID)
-		entries := make([]nfo.RatingEntry, 0, len(showRatings))
+
+		fetched := make([]nfo.RatingEntry, 0, len(showRatings))
 		for source, v := range showRatings {
-			entries = append(entries, nfo.RatingEntry{Source: source, Value: v.Value, Votes: v.Votes})
+			fetched = append(fetched, nfo.RatingEntry{Source: source, Value: v.Value, Votes: v.Votes})
 		}
+
+		// См. комментарий в movies.go: слияние сохраняет недополученные
+		// и чужие записи и задаёт стабильный порядок блока.
+		entries := nfo.MergeRatings(fetched, nfo.ParseRatingsBlock(newContent), enabledSources(deps.Config))
+
 		sel := nfo.ChooseDefaultRating(entries, deps.Config.DefaultRating)
 		if sel.Overridden {
 			deps.Stats.IncDefaultOverridden()
 			deps.Logger.Event("[DEFAULT_RATING_OVERRIDE] %s: %s", path, sel.Reason)
 		}
-		for i := range entries {
-			entries[i].Default = entries[i].Source == sel.Source
-		}
-		block, err := nfo.BuildRatingsBlock(entries, nfo.DetectIndent(newContent))
-		if err != nil {
-			deps.Stats.IncError()
-			deps.Logger.Event("[ERROR] %s: build ratings block: %v", path, err)
-			return ids, episodeRatings, err
-		}
+		nfo.SetDefaultRating(entries, sel.Source)
+
 		var c bool
-		newContent, c = nfo.ApplyRatings(newContent, block)
+		var buildErr error
+		newContent, c, buildErr = nfo.ApplyRatingEntries(newContent, entries)
+		if buildErr != nil {
+			deps.Stats.IncError()
+			deps.Logger.Event("[ERROR] %s: build ratings block: %v", path, buildErr)
+			return ids, episodeRatings, buildErr
+		}
 		changed = changed || c
 
 		// В кэш идёт только то, что пришло от провайдеров: перезапись
@@ -261,15 +266,23 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 		newContent, c = nfo.EnsureEmptyUserRating(newContent)
 		changed = changed || c
 	} else {
-		entries := []nfo.RatingEntry{{Source: "imdb", Value: value, Votes: votes, Default: true}}
-		block, err := nfo.BuildRatingsBlock(entries, nfo.DetectIndent(newContent))
-		if err != nil {
-			deps.Stats.IncError()
-			return err
-		}
+		// На уровне серии существует только IMDb, но слияние всё равно
+		// нужно: в файле могут лежать записи, оставленные другим
+		// инструментом, и затирать их мы не вправе.
+		fetched := []nfo.RatingEntry{{Source: "imdb", Value: value, Votes: votes}}
+		entries := nfo.MergeRatings(fetched, nfo.ParseRatingsBlock(newContent), enabledSources(deps.Config))
+		nfo.SetDefaultRating(entries, "imdb")
+
 		var c bool
-		newContent, c = nfo.ApplyRatings(newContent, block)
+		var buildErr error
+		newContent, c, buildErr = nfo.ApplyRatingEntries(newContent, entries)
+		if buildErr != nil {
+			deps.Stats.IncError()
+			deps.Logger.Event("[ERROR] %s: build ratings block: %v", path, buildErr)
+			return buildErr
+		}
 		changed = changed || c
+
 		if episodeIMDbID != "" {
 			_ = deps.DB.ClearPending(episodeIMDbID, "", "")
 		}
