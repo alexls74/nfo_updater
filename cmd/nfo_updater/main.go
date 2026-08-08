@@ -22,10 +22,15 @@ import (
 	"nfo_updater/internal/version"
 )
 
-// DefaultConfigPath — путь по умолчанию. Переопределяется флагом --config,
-// что нужно и для тестовых запусков, и для нескольких экземпляров с разными
-// библиотеками (правда, lock-файл у них общий — см. internal/lock).
-const DefaultConfigPath = "/etc/nfo_updater/config.conf"
+// defaultConfigPath — путь по умолчанию, ~/.config/nfo_updater/config.conf.
+// Переопределяется флагом --config, что нужно и для тестовых запусков, и для
+// нескольких экземпляров с разными библиотеками (правда, lock-файл у них
+// общий — см. internal/lock).
+//
+// Вычисляется один раз при старте, а не константой: путь зависит от домашнего
+// каталога текущего пользователя. Пустая строка означает, что домашний каталог
+// определить не удалось; этот случай разбирается в run().
+var defaultConfigPath = config.DefaultConfigPath()
 
 // Коды возврата. Разделены, чтобы systemd и скрипты могли отличать
 // "сломан конфиг" (чинить руками) от "прогон не удался" (можно повторить)
@@ -45,6 +50,7 @@ func run() int {
 	var (
 		daemonMode  bool
 		showInfo    bool
+		showVersion bool
 		checkConfig bool
 		showHelp    bool
 		configPath  string
@@ -54,13 +60,17 @@ func run() int {
 	fs.SetOutput(io.Discard) // usage печатаем сами, флаговый формат нам не годится
 	fs.BoolVar(&daemonMode, "d", false, "")
 	fs.BoolVar(&showInfo, "v", false, "")
+	// Регистр здесь значащий: пакет flag различает -v и -V. Первый — сводка
+	// путей, второй — одна строка с версией.
+	fs.BoolVar(&showVersion, "V", false, "")
+	fs.BoolVar(&showVersion, "version", false, "")
 	// --check-config намеренно не документирован в -h: он служебный, для
 	// разработки и разбора проблем. Обычному пользователю хватает того, что
 	// обычный запуск сам проверит конфиг и ключи перед началом работы.
 	fs.BoolVar(&checkConfig, "check-config", false, "")
 	fs.BoolVar(&showHelp, "h", false, "")
 	fs.BoolVar(&showHelp, "help", false, "")
-	fs.StringVar(&configPath, "config", DefaultConfigPath, "")
+	fs.StringVar(&configPath, "config", defaultConfigPath, "")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n\n", err)
@@ -71,16 +81,34 @@ func run() int {
 		usage(os.Stdout)
 		return exitOK
 	}
+	// --version отвечает раньше всех прочих проверок и ничего не читает
+	// с диска. Так флаг работает и на системе, где конфига ещё нет, и на
+	// системе, где он испорчен, — а именно там его и спрашивает установочный
+	// скрипт, определяя установленную версию перед обновлением.
+	if showVersion {
+		fmt.Println(version.String())
+		return exitOK
+	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n\n", fs.Arg(0))
 		usage(os.Stderr)
 		return exitError
 	}
 
+	// Пустой путь означает, что и умолчание не вычислилось, и --config не задан.
+	// Единственная причина — неизвестный домашний каталог; дальше идти незачем,
+	// иначе ошибка вылезет как невнятное "open : no such file or directory".
+	if configPath == "" {
+		fmt.Fprintf(os.Stderr, "cannot determine the default configuration path: "+
+			"the home directory of the current user is unknown.\n"+
+			"Pass the path explicitly: nfo_updater --config /path/to/config.conf\n")
+		return exitConfig
+	}
+
 	// -v обрабатывается ДО EnsureConfig, и это принципиально: справочные
 	// флаги ничего не меняют на диске. Иначе запрос версии на свежей системе
-	// заводил бы /etc/nfo_updater/config.conf и отвечал сообщением о его
-	// создании вместо запрошенной информации.
+	// заводил бы конфиг и отвечал сообщением о его создании вместо
+	// запрошенной информации.
 	if showInfo {
 		return doShowInfo(configPath)
 	}
@@ -363,6 +391,16 @@ func scheduleOf(cfg *config.Config) string {
 	return config.DefaultDaemonSchedule
 }
 
+// configPathForHelp — путь конфига для текста справки. Справка печатается
+// в том числе там, где домашний каталог неизвестен, и пустая строка после
+// "Default:" выглядела бы как ошибка вёрстки.
+func configPathForHelp() string {
+	if defaultConfigPath != "" {
+		return defaultConfigPath
+	}
+	return "(unknown: the home directory could not be determined)"
+}
+
 func usage(w io.Writer) {
 	fmt.Fprintf(w, `NFO Updater
 Version %s • %s
@@ -386,7 +424,11 @@ Flags:
 
   --config PATH   Path to the configuration file.
                   Default: %s
-				  
+
+  -V, --version   Print the version and the build date on a single line,
+                  then exit. Reads nothing and creates nothing, so it also
+                  answers before a configuration file exists.
+
   -h, --help      Show this help.
 
 API keys:
@@ -418,7 +460,7 @@ Exit codes:
   %d  error during the pass
   %d  configuration problem
   %d  another instance is already running
-`, version.Version, version.BuildDate, DefaultConfigPath,
+`, version.Version, version.BuildDate, configPathForHelp(),
 		providers.FormatKeyHelp("  "),
 		exitOK, exitError, exitConfig, exitBusy)
 	fmt.Fprintln(w)

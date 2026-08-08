@@ -4,3 +4,5 @@ release
 .vscode
 nfo_updater.code-workspace
 Makefile
+test
+CHANGELOG.md

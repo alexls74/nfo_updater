@@ -133,8 +133,11 @@ func (p *MDBListProvider) FetchRatings(ctx context.Context, ids IDs, mediaType s
 		}
 	}
 
+	// Сюда дошли по коду 200 — значит тайтл у MDBList ЕСТЬ, просто рейтингов
+	// к нему не приложено. Это ErrNoRatings, а не ErrNotFound: последний
+	// возвращает doGet и только на настоящий 404.
 	if len(out) == 0 {
-		return nil, ErrNotFound
+		return nil, ErrNoRatings
 	}
 	return out, nil
 }
@@ -194,8 +197,10 @@ func (p *MDBListProvider) FetchShowWithEpisodes(ctx context.Context, ids IDs) (s
 		}
 	}
 
+	// Как и в FetchRatings: сериал найден, но ни своего рейтинга, ни
+	// рейтингов серий у него нет.
 	if len(show) == 0 && len(episodes) == 0 {
-		return nil, nil, ErrNotFound
+		return nil, nil, ErrNoRatings
 	}
 	return show, episodes, nil
 }
@@ -236,6 +241,7 @@ func (p *MDBListProvider) doGet(ctx context.Context, url, key string, keyIndex i
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		// Проверено живым запросом: на невалидный ключ MDBList отвечает 403.
 		return nil, &KeyError{
 			Provider: p.Name(),
 			KeyIndex: keyIndex,
@@ -252,6 +258,8 @@ func (p *MDBListProvider) doGet(ctx context.Context, url, key string, keyIndex i
 			Detail:   "http status 429",
 		}
 	case resp.StatusCode == http.StatusNotFound:
+		// Единственное место, где рождается ErrNotFound: сервис прямо
+		// сказал, что тайтла с таким ID у него нет.
 		p.pool.noteRequest(keyIndex)
 		return nil, ErrNotFound
 	case resp.StatusCode >= 500:

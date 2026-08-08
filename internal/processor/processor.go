@@ -26,15 +26,27 @@ import (
 // httpTimeout — общий таймаут на один запрос к любому провайдеру.
 // Отдельно от circuit breaker: таймаут защищает от "висящего" соединения,
 // breaker — от повторяющихся сбоев.
+//
+// Это верхняя граница на весь запрос целиком. Более дробные сроки — на
+// дозвон, рукопожатие и ожидание заголовков — заданы в транспорте,
+// см. providers.NewHTTPClient.
 const httpTimeout = 20 * time.Second
 
 // mediaServerTimeout — на всё общение с медиасерверами в конце прогона.
-// Меньше обычного: сервер стоит в локальной сети, а запрос всего лишь
-// ставит ему задание на сканирование.
+// Это срок на ВСЕ серверы разом, тогда как отдельный запрос ограничен
+// собственным таймаутом клиента (см. mediaserver.NewHTTPClient). Разница
+// имеет значение для Plex: он сканирует посекционно, то есть делает
+// несколько запросов подряд.
 const mediaServerTimeout = 30 * time.Second
 
-// Runner держит долгоживущие ресурсы (БД, http-клиент) между прогонами
+// Runner держит долгоживущие ресурсы (БД, http-клиенты) между прогонами
 // демона и переживает hot-reload конфига.
+//
+// Клиентов два, и это не дублирование. Провайдеры рейтингов и медиасерверы
+// живут в разных сетях и требуют разного поведения: у первых — сотни
+// запросов к публичным сервисам, у вторых — два запроса к своей машине,
+// без прокси и без keep-alive. Общий клиент означал бы, что настройка,
+// разумная для одной подсистемы, молча навязана другой.
 //
 // bootLogger — "загрузочный" логгер, пишущий только в консоль. Им
 // пользуются сообщения, которым файл лога прогона ещё или уже не положен:
@@ -54,6 +66,7 @@ type Runner struct {
 	configPath string
 	db         *db.DB
 	http       *http.Client
+	msHTTP     *http.Client
 }
 
 func NewRunner(cfg *config.Config, database *db.DB, configPath string, bootLogger *logging.Logger) *Runner {
@@ -62,7 +75,8 @@ func NewRunner(cfg *config.Config, database *db.DB, configPath string, bootLogge
 		bootLogger: bootLogger,
 		configPath: configPath,
 		db:         database,
-		http:       &http.Client{Timeout: httpTimeout},
+		http:       providers.NewHTTPClient(httpTimeout),
+		msHTTP:     mediaserver.NewHTTPClient(),
 	}
 }
 
@@ -186,7 +200,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// или опечатка в адресе выяснятся сразу, а не через час после прогона,
 	// когда библиотека молча не обновилась. Недоступность прогон не
 	// отменяет — см. mediaserver.CheckAll.
-	mediaserver.CheckAll(ctx, mediaserver.FromConfig(cfg, r.http), logger)
+	mediaserver.CheckAll(ctx, mediaserver.FromConfig(cfg, r.msHTTP), logger)
 
 	// Рабочая папка чистится только ПОСЛЕ успешной проверки ключей: если
 	// прогон не начался, недоупакованный остаток прошлого прогона (если тот
@@ -257,7 +271,7 @@ func (r *Runner) CheckKeys(ctx context.Context) error {
 // его именем.
 func (r *Runner) CheckMediaServers(ctx context.Context) {
 	cfg, logger := r.current()
-	servers := mediaserver.FromConfig(cfg, r.http)
+	servers := mediaserver.FromConfig(cfg, r.msHTTP)
 	if len(servers) == 0 {
 		logger.Event("[MEDIASERVER] none enabled")
 		return
@@ -274,7 +288,9 @@ func (r *Runner) finish(deps *Deps, runErr error) error {
 	r.notifyMediaServers(deps)
 
 	deps.Stats.Finish()
-	deps.Logger.Event("\n%s", deps.Stats.Summary())
+	// Два вида одной сводки: подробный блок в файл, однострочный
+	// key=value в системный журнал. Выбор делает Logger.Summary.
+	deps.Logger.Summary(deps.Stats.Summary(), deps.Stats.SummaryLine())
 
 	if runErr != nil {
 		deps.Logger.Event("[RUN_ABORTED] %v", runErr)
@@ -295,7 +311,7 @@ func (r *Runner) finish(deps *Deps, runErr error) error {
 // библиотеки — не бесплатная операция, и запускать его еженедельно вхолостую
 // незачем.
 func (r *Runner) notifyMediaServers(deps *Deps) {
-	servers := mediaserver.FromConfig(deps.Config, r.http)
+	servers := mediaserver.FromConfig(deps.Config, r.msHTTP)
 	if len(servers) == 0 {
 		return
 	}

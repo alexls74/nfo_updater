@@ -116,8 +116,11 @@ func (p *OMDbProvider) fetchWithKey(ctx context.Context, key string, keyIndex in
 		}
 	}
 
+	// Ответ разобран, тайтл у OMDb есть (иначе get вернул бы ErrNotFound),
+	// но ни одной оценки в нём не оказалось — imdbRating пришёл как "N/A",
+	// а блок Ratings пуст. Обычное дело для свежих релизов и короткого метра.
 	if len(out) == 0 {
-		return nil, ErrNotFound
+		return nil, ErrNoRatings
 	}
 	return out, nil
 }
@@ -208,8 +211,8 @@ func isOMDbKeyMessage(message string) bool {
 	return strings.Contains(m, "key") || strings.Contains(m, "limit")
 }
 
-// omdbKeyErrorKind разбирает текст ошибки ключа: упоминание лимита means
-// ключ рабочий, но исчерпан; всё остальное — невалидный ключ.
+// omdbKeyErrorKind разбирает текст ошибки ключа: упоминание лимита означает,
+// что ключ рабочий, но исчерпан; всё остальное — невалидный ключ.
 func omdbKeyErrorKind(message string) KeyErrorKind {
 	if strings.Contains(strings.ToLower(message), "limit") {
 		return KeyExhausted

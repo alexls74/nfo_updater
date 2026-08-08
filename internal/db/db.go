@@ -4,6 +4,8 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite" // чистый Go-драйвер SQLite, без cgo
@@ -19,7 +21,7 @@ type DB struct {
 var migrations = []string{
 	`
 	CREATE TABLE ratings (
-		media_key  TEXT NOT NULL,   -- imdb_id; иначе 'tmdb:<id>'; иначе 'tvdb:<id>' (см. MediaKey)
+		media_key  TEXT NOT NULL,      -- imdb_id; иначе 'tmdb:<id>'; иначе 'tvdb:<id>' (см. MediaKey)
 		imdb_id    TEXT,
 		tmdb_id    TEXT,
 		tvdb_id    TEXT,
@@ -81,25 +83,40 @@ func MediaKey(imdbID, tmdbID, tvdbID string) (string, error) {
 	return "", fmt.Errorf("imdb_id, tmdb_id and tvdb_id are all empty")
 }
 
+// Open открывает файл БД, при необходимости заводя каталог под него.
+//
+// Каталог создаём сами — ровно как это делают logging.OpenRunLog и backup.
+// Под systemd его завёл бы StateDirectory=, но при ручном запуске (первый
+// прогон, отладка, свой путь через --config) создавать его некому, а SQLite
+// на отсутствующий каталог отвечает невнятным "unable to open database
+// file (14)", ничего не сообщая о том, какого именно файла ему не хватило.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create database dir %s: %w", dir, err)
 	}
 
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open database %s: %w", path, err)
+	}
+
+	// sql.Open соединения не открывает — оно заводится лениво, первым
+	// запросом. Поэтому все проблемы с самим файлом всплывают здесь,
+	// на первой же PRAGMA, а не строкой выше. Отсюда и путь в сообщениях.
 	if _, err := sqlDB.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("set journal_mode: %w", err)
+		return nil, fmt.Errorf("set journal_mode on %s: %w", path, err)
 	}
 	if _, err := sqlDB.Exec(`PRAGMA busy_timeout=5000;`); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("set busy_timeout: %w", err)
+		return nil, fmt.Errorf("set busy_timeout on %s: %w", path, err)
 	}
 
 	d := &DB{sql: sqlDB}
 	if err := d.migrate(); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("migrate database: %w", err)
+		return nil, fmt.Errorf("migrate database %s: %w", path, err)
 	}
 	return d, nil
 }

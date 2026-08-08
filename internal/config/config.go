@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,6 +41,16 @@ type Config struct {
 	MetacriticRating bool
 	DefaultRating    string // всегда одно из nfo.KnownRatingSources()
 
+	// Правки .nfo, не связанные с рейтингами.
+	//
+	// CrewOrderFix намеренно НЕ привязан к EmbyEnabled, хотя порядок тегов
+	// требуется именно Emby. Секция медиасерверов необязательна: человек
+	// может пользоваться Emby и не заполнять адрес с ключом вовсе — ему
+	// хватает планового сканирования самого сервера. При старой привязке
+	// такой пользователь фикса не получал, хотя нуждался в нём ровно так же,
+	// а причина была спрятана в настройке совершенно другой подсистемы.
+	CrewOrderFix bool
+
 	// Источники. Пути уже нормализованы (абсолютные, Clean, без дублей) —
 	// это делает Load(); остальной код может сравнивать их как строки.
 	MoviesPaths  []string
@@ -69,18 +80,92 @@ type Config struct {
 // демона (-d), а SCHEDULE в конфиге пуст.
 const DefaultDaemonSchedule = "0 3 * * 1"
 
+// appName — имя подкаталога во всех путях по умолчанию. Совпадает с именем
+// бинарника и с именем systemd-юнита.
+const appName = "nfo_updater"
+
 // ErrMissingAPIKeys — конфиг не заполнен ключами. Отдельный сентинел нужен,
 // чтобы main.go мог отличить именно этот случай и дописать к сообщению
 // справку о том, где ключи берут: пользователь, впервые открывший конфиг,
 // иначе получает только список пустых параметров и никакой подсказки.
 var ErrMissingAPIKeys = errors.New("all rating providers must be configured")
 
+// ----------------------------------------------------------------------------
+// Пути по умолчанию
+//
+// Всё живёт в домашнем каталоге того пользователя, от имени которого запущена
+// программа, а не в /var и /etc. Причина: NFO Updater работает от обычной
+// учётной записи — той, у которой есть права на запись в медиатеку. Каталоги
+// вида /var/lib требуют root на создание, так что при системных умолчаниях
+// ручной запуск (без сервиса) не смог бы завести себе ни базу, ни логи.
+//
+// Побочная выгода: и в сервисном, и в ручном режиме раскладка одна и та же,
+// systemd-юниту не нужны ни StateDirectory=, ни LogsDirectory=, ни chown,
+// а удаление программы — это удаление двух каталогов.
+//
+// База, бэкапы и логи сведены в ОДНО дерево, хотя по букве XDG логи следовало
+// бы положить в ~/.local/state. Практический довод перевесил: один каталог —
+// это одна строка ReadWritePaths= в юните и один вопрос при деинсталляции.
+// ----------------------------------------------------------------------------
+
+// homeDir возвращает домашний каталог текущего пользователя или "".
+//
+// os.UserHomeDir() смотрит только на $HOME. Этого хватает почти всегда
+// (systemd выставляет HOME для User=, cron тоже), но не после "su" без дефиса
+// и не в паре экзотических окружений, поэтому есть запасной путь через
+// /etc/passwd. os/user на чистом Go читает passwd сам, CGO не требуется.
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	return ""
+}
+
+// DefaultConfigPath — путь к конфигу по умолчанию:
+// ~/.config/nfo_updater/config.conf
+//
+// Возвращает "" если домашний каталог определить не удалось. Это не паника
+// и не ошибка сама по себе: у пользователя остаётся флаг --config, а вызывающий
+// код обязан проверить результат и сказать об этом внятно.
+func DefaultConfigPath() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(d) {
+		return filepath.Join(d, appName, "config.conf")
+	}
+	if h := homeDir(); h != "" {
+		return filepath.Join(h, ".config", appName, "config.conf")
+	}
+	return ""
+}
+
+// DefaultDataDir — корень для базы, бэкапов и логов:
+// ~/.local/share/nfo_updater
+//
+// Экспортирована ради пакета lock: файл блокировки должен лежать там же,
+// и вычисляться он обязан ровно так же, иначе ручной запуск и сервис возьмут
+// разные пути и перестанут видеть друг друга.
+func DefaultDataDir() string {
+	if d := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(d) {
+		return filepath.Join(d, appName)
+	}
+	if h := homeDir(); h != "" {
+		return filepath.Join(h, ".local", "share", appName)
+	}
+	return ""
+}
+
 func defaults() map[string]string {
+	// Раскладка внутри каталога данных описана в DataPathsUnder (exported.go):
+	// те же имена нужны мастеру настройки, когда человек назначает свой корень.
+	dbPath, logDir, backupDir := DataPathsUnder(DefaultDataDir())
+
 	return map[string]string{
-		"DATABASE_PATH":                   "/var/lib/nfo_updater/database.db",
-		"LOG_DIR":                         "/var/log/nfo_updater",
+		"DATABASE_PATH":                   dbPath,
+		"LOG_DIR":                         logDir,
 		"LOG_LIMIT":                       "10",
-		"BACKUP_DIR":                      "/var/backups/nfo_updater",
+		"BACKUP_DIR":                      backupDir,
 		"BACKUP_LIMIT":                    "10",
 		"CIRCUIT_BREAKER_FAILURES":        "5",
 		"CIRCUIT_BREAKER_BACKOFF_SECONDS": "5",
@@ -185,6 +270,12 @@ func fromRaw(raw map[string]string) *Config {
 		MetacriticRating: getBool("METACRITIC_RATING", false),
 		DefaultRating:    strings.ToLower(get("DEFAULT_RATING")),
 
+		// Умолчание true, и пустое значение даёт то же самое: parseBool
+		// возвращает def на любой нераспознанной строке, включая пустую.
+		// Это соответствует поведению остальных булевых параметров и
+		// заявленному в config.conf правилу "empty = yes".
+		CrewOrderFix: getBool("CREW_ORDER_FIX", true),
+
 		MoviesPaths:  splitList("MOVIES_PATH"),
 		TVShowsPaths: splitList("TVSHOWS_PATH"),
 
@@ -275,7 +366,7 @@ func normalizePathList(setting string, paths []string) ([]string, error) {
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		if !filepath.IsAbs(p) {
-			return nil, fmt.Errorf("%s: %q is not an absolute path", setting, p)
+			return nil, pathError(setting, p)
 		}
 		clean := filepath.Clean(p)
 		if seen[clean] {
@@ -285,6 +376,38 @@ func normalizePathList(setting string, paths []string) ([]string, error) {
 		out = append(out, clean)
 	}
 	return out, nil
+}
+
+// pathError — общее сообщение о неабсолютном пути, с отдельной веткой на
+// тильду.
+//
+// Тильду разворачивает шелл, а не программа: конфиг читается построчно, и
+// "~/media" остаётся семью символами относительного пути. В комментариях
+// config.conf домашние пути показаны с тильдой (иначе их не записать в общем
+// виде), так что попытка вписать её в значение более чем вероятна, и общее
+// "is not an absolute path" на неё не отвечает.
+func pathError(setting, path string) error {
+	if strings.HasPrefix(path, "~") {
+		return fmt.Errorf("%s: %q starts with ~, which is not expanded here — write the path out in full", setting, path)
+	}
+	return fmt.Errorf("%s: %q is not an absolute path", setting, path)
+}
+
+// checkSystemPath проверяет один из служебных путей (база, логи, бэкапы).
+//
+// Пустое значение здесь означает не "выключено", а "умолчание не удалось
+// вычислить": домашний каталог неизвестен. Сообщение должно вести к решению,
+// а не констатировать пустоту.
+func checkSystemPath(setting, path string) error {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return fmt.Errorf("%s is empty and the default could not be determined "+
+			"(the home directory is unknown): set %s to an absolute path", setting, setting)
+	}
+	if !filepath.IsAbs(p) {
+		return pathError(setting, p)
+	}
+	return nil
 }
 
 // pathRef — путь вместе с именем параметра, из которого он пришёл, чтобы
@@ -389,14 +512,19 @@ func (c *Config) validateMediaServers() error {
 	// Секции Plex — числа, и только они попадают в URL сканирования.
 	// Название библиотеки вместо номера — самая вероятная ошибка здесь.
 	if c.PlexEnabled {
-		for _, id := range c.PlexSectionIDs {
-			if !isDigits(id) {
-				return fmt.Errorf("PLEX_SECTION_IDS: %q is not a section number "+
-					"(the section id is the number shown in the Plex web address, not the library name)", id)
-			}
+		if err := CheckPlexSectionIDs(c.PlexSectionIDs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// sectionIDError — общее сообщение о непохожей на номер секции Plex.
+// Вынесено отдельно, потому что тот же текст показывает мастер настройки
+// через CheckPlexSectionIDs (см. exported.go).
+func sectionIDError(id string) error {
+	return fmt.Errorf("PLEX_SECTION_IDS: %q is not a section number "+
+		"(the section id is the number shown in the Plex web address, not the library name)", id)
 }
 
 // checkServerURL требует адрес вида http://host[:port][/path].
@@ -485,19 +613,35 @@ func upperRatingOptions(sources []string) []string {
 
 // Validate проверяет конфиг целиком. Вызывается из Load(), из --check-config
 // и при SIGHUP-reload. Ожидает уже нормализованные пути (см. normalizePaths).
+//
+// CREW_ORDER_FIX здесь не проверяется, и проверять нечего: это булев
+// параметр, у которого любое нераспознанное значение означает умолчание.
 func (c *Config) Validate() error {
+	// Служебные пути идут первыми: без базы не запустится ничего, и жаловаться
+	// на медиатеку раньше, чем на неё, было бы не по порядку важности.
+	// Логи и бэкапы проверяются только когда включены: выключенной подсистеме
+	// путь не нужен, и пустой LOG_DIR при LOG_ENABLED=no — не ошибка.
+	if err := checkSystemPath("DATABASE_PATH", c.DatabasePath); err != nil {
+		return err
+	}
+	if c.LogEnabled {
+		if err := checkSystemPath("LOG_DIR", c.LogDir); err != nil {
+			return err
+		}
+	}
+	if c.BackupEnabled {
+		if err := checkSystemPath("BACKUP_DIR", c.BackupDir); err != nil {
+			return err
+		}
+	}
+
 	if len(c.MoviesPaths) == 0 && len(c.TVShowsPaths) == 0 {
 		return fmt.Errorf("at least one of MOVIES_PATH or TVSHOWS_PATH must be set")
 	}
 
-	refs := make([]pathRef, 0, len(c.MoviesPaths)+len(c.TVShowsPaths))
-	for _, p := range c.MoviesPaths {
-		refs = append(refs, pathRef{setting: "MOVIES_PATH", path: p})
-	}
-	for _, p := range c.TVShowsPaths {
-		refs = append(refs, pathRef{setting: "TVSHOWS_PATH", path: p})
-	}
-	if err := checkPathOverlaps(refs); err != nil {
+	// Через CheckMediaPaths, а не сборкой pathRef на месте: ту же проверку
+	// теми же словами делает мастер настройки после каждого введённого пути.
+	if err := CheckMediaPaths(c.MoviesPaths, c.TVShowsPaths); err != nil {
 		return err
 	}
 

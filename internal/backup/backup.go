@@ -84,6 +84,13 @@ func checkArchivePath(archivePath string) error {
 // по limit (0 = безлимитно). Возвращает "", nil, если за прогон не было
 // ни одного изменённого файла в этой категории.
 func Finalize(backupDir, category string, limit int, at time.Time) (archivePath string, err error) {
+	// Пустая .tmp убирается на любом пути выхода, в том числе когда
+	// упаковывать нечего. Именно Remove, а не RemoveAll: непустую папку
+	// он не тронет, поэтому остаток аварийно завершившегося прогона
+	// (оригиналы файлов, не попавшие в архив) сохранится сам собой,
+	// без отдельного признака "тут был сбой".
+	defer func() { _ = os.Remove(WorkDir(backupDir)) }()
+
 	srcDir := filepath.Join(WorkDir(backupDir), category)
 	entries, err := os.ReadDir(srcDir)
 	if err != nil || len(entries) == 0 {
@@ -98,6 +105,10 @@ func Finalize(backupDir, category string, limit int, at time.Time) (archivePath 
 	archivePath = filepath.Join(archDir, name)
 
 	if err := zipDir(srcDir, archivePath); err != nil {
+		// Недописанный архив удаляем: он всё равно не откроется, но
+		// занимал бы слот в ротации и выглядел бы как рабочая копия.
+		// Рабочая папка при этом остаётся — оригиналы ещё в ней.
+		_ = os.Remove(archivePath)
 		return "", fmt.Errorf("create archive: %w", err)
 	}
 	if err := os.RemoveAll(srcDir); err != nil {
@@ -109,17 +120,20 @@ func Finalize(backupDir, category string, limit int, at time.Time) (archivePath 
 	return archivePath, nil
 }
 
+// zipDir упаковывает содержимое srcDir в destZip.
+//
+// Имена внутри архива пишутся как есть, в UTF-8, и archive/zip сам выставляет
+// флаг 0x800 для не-ASCII имён — этого достаточно и для Kodi, и для Windows.
+// Если распаковщик всё же показывает знаки вопроса вместо кириллицы, дело
+// в его локали (Info-ZIP перекодирует имена в кодировку LANG), а не в архиве.
 func zipDir(srcDir, destZip string) error {
 	f, err := os.Create(destZip)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
 	w := zip.NewWriter(f)
-	defer w.Close()
 
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -130,7 +144,19 @@ func zipDir(srcDir, destZip string) error {
 		if err != nil {
 			return err
 		}
-		zf, err := w.Create(filepath.ToSlash(rel))
+
+		// FileInfoHeader переносит в запись время и права файла. Без него
+		// все записи получали нулевое время (1979 год) и права по умолчанию.
+		fh, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		// В Name он кладёт только базовое имя, а способ упаковки ставит
+		// Store — и то, и другое задаём сами.
+		fh.Name = filepath.ToSlash(rel)
+		fh.Method = zip.Deflate
+
+		zf, err := w.CreateHeader(fh)
 		if err != nil {
 			return err
 		}
@@ -142,6 +168,21 @@ func zipDir(srcDir, destZip string) error {
 		_, err = io.Copy(zf, src)
 		return err
 	})
+	if walkErr != nil {
+		w.Close()
+		f.Close()
+		return walkErr
+	}
+
+	// Close писателя дописывает центральный каталог архива — без него
+	// файл не откроется ни одним распаковщиком. Раньше он вызывался
+	// через defer, и ошибка терялась: сбой на этом шаге давал битый
+	// архив, о котором никто бы не узнал.
+	if err := w.Close(); err != nil {
+		f.Close()
+		return fmt.Errorf("finish archive: %w", err)
+	}
+	return f.Close()
 }
 
 // rotate оставляет только последние limit архивов в archDir (имена архивов —

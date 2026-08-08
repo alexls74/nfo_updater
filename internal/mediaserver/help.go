@@ -1,50 +1,57 @@
 // internal/mediaserver/help.go
 package mediaserver
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
-// serverHelp — где включается сервер и где у него берут ключ.
+// ServerHelp — где включается сервер и где у него берут ключ.
 //
-// Живёт здесь, рядом с реализацией, а не в тексте -h: когда у Jellyfin
-// в очередной раз переедет страница выдачи ключей, поправить придётся
-// один файл, и это будет тот же файл, где лежит код обращения к нему.
-type serverHelp struct {
-	display  string
-	settings string
-	where    string // где взять ключ: пункт меню или адрес страницы
+// Живёт здесь, рядом с реализацией, а не в тексте мастера: когда у Jellyfin
+// в очередной раз переедет страница выдачи ключей, поправить придётся один
+// файл, и это будет тот же файл, где лежит код обращения к нему.
+type ServerHelp struct {
+	Name     string // как его возвращает Server.Name(): emby, jellyfin, plex
+	Display  string // человекочитаемое имя
+	Settings string // имена параметров в config.conf
+	Where    string // где взять ключ: пункт меню или адрес страницы
 }
 
-var serverHelps = []serverHelp{
+// serverHelps — слайс, а не map, ради стабильного порядка обхода: мастер
+// спрашивает про серверы в этом же порядке.
+var serverHelps = []ServerHelp{
 	{
-		display:  "Emby",
-		settings: "EMBY_ENABLED, EMBY_URL, EMBY_API_KEY",
-		where:    "key: Emby dashboard, Advanced - API Keys",
+		Name:     "emby",
+		Display:  "Emby",
+		Settings: "EMBY_ENABLED, EMBY_URL, EMBY_API_KEY",
+		Where:    "Emby dashboard, Advanced - API Keys",
 	},
 	{
-		display:  "Jellyfin",
-		settings: "JELLYFIN_ENABLED, JELLYFIN_URL, JELLYFIN_API_KEY",
-		where:    "key: Jellyfin dashboard, API Keys",
+		Name:     "jellyfin",
+		Display:  "Jellyfin",
+		Settings: "JELLYFIN_ENABLED, JELLYFIN_URL, JELLYFIN_API_KEY",
+		Where:    "Jellyfin dashboard, API Keys",
 	},
 	{
-		display:  "Plex",
-		settings: "PLEX_ENABLED, PLEX_URL, PLEX_TOKEN, PLEX_SECTION_IDS",
-		where: "token: https://support.plex.tv/articles/204059436-" +
+		Name:     "plex",
+		Display:  "Plex",
+		Settings: "PLEX_ENABLED, PLEX_URL, PLEX_TOKEN, PLEX_SECTION_IDS",
+		Where: "https://support.plex.tv/articles/204059436-" +
 			"finding-an-authentication-token-x-plex-token/",
 	},
 }
 
-// FormatHelp — блок для -h. indent добавляется к каждой строке.
-func FormatHelp(indent string) string {
-	var b strings.Builder
-	for i, h := range serverHelps {
-		if i > 0 {
-			b.WriteString("\n")
+// ServerHelps возвращает справку по всем серверам в порядке опроса.
+func ServerHelps() []ServerHelp {
+	out := make([]ServerHelp, len(serverHelps))
+	copy(out, serverHelps)
+	return out
+}
+
+// ServerHelpFor находит справку по имени сервера.
+func ServerHelpFor(name string) (ServerHelp, bool) {
+	for _, h := range serverHelps {
+		if strings.EqualFold(h.Name, name) {
+			return h, true
 		}
-		fmt.Fprintf(&b, "%s%-9s %s\n", indent, h.display, h.settings)
-		fmt.Fprintf(&b, "%s%-9s %s\n", indent, "", h.where)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return ServerHelp{}, false
 }

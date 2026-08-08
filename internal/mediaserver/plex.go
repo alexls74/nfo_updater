@@ -128,7 +128,7 @@ func (p *plexServer) get(ctx context.Context, path string, out any) error {
 
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s: %w", p.baseURL, err)
+		return requestError(p.baseURL, err)
 	}
 	defer resp.Body.Close()
 

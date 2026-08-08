@@ -65,7 +65,10 @@ func (s *embyLike) do(ctx context.Context, method, path string) error {
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s: %w", s.baseURL, err)
+		// Разбор ошибки — в requestError: сырой текст от net/http не
+		// отвечает на единственный вопрос, который тут важен, — сеть
+		// это, сертификат или сам сервер.
+		return requestError(s.baseURL, err)
 	}
 	defer resp.Body.Close()
 	// Тело нам не нужно ни в одном из двух запросов, но дочитать его стоит:

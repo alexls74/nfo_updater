@@ -9,12 +9,25 @@ import (
 )
 
 var (
-	reRatingsBlockCut  = regexp.MustCompile(`(?s)\n[ \t]*<ratings>.*?</ratings>[ \t]*\n`)
-	reLegacyRatingCut  = regexp.MustCompile(`(?s)\n[ \t]*<rating>\s*[0-9]+(?:\.[0-9]+)?\s*</rating>\s*<votes>\s*[0-9,]+\s*</votes>[ \t]*\n`)
-	reOriginalTitleEnd = regexp.MustCompile(`(?i)</originaltitle>\s*`)
-	reTitleEnd         = regexp.MustCompile(`(?i)</title>\s*`)
-	reTopLevelIndent   = regexp.MustCompile(`(?m)^([ \t]*)<title>`)
+	reRatingsBlockCut = regexp.MustCompile(`(?s)\n[ \t]*<ratings>.*?</ratings>[ \t]*\n`)
+	reLegacyRatingCut = regexp.MustCompile(`(?s)\n[ \t]*<rating>\s*[0-9]+(?:\.[0-9]+)?\s*</rating>\s*<votes>\s*[0-9,]+\s*</votes>[ \t]*\n`)
+
+	// Якоря вставки НЕ захватывают пробелы после тега — см. комментарий
+	// к insertAfterAnchor. Это не мелочь оформления, а причина того, что
+	// весь файл разъезжался по отступам.
+	reOriginalTitleEnd = regexp.MustCompile(`(?i)</originaltitle>`)
+	reTitleEnd         = regexp.MustCompile(`(?i)</title>`)
+
+	// Отступ верхнего уровня определяем по <title>: он есть в любом .nfo
+	// любого типа и всегда лежит непосредственно внутри корневого тега.
+	// Скобка [ >] нужна, чтобы не поймать <originaltitle> и <sorttitle>.
+	reTopLevelIndent = regexp.MustCompile(`(?m)^([ \t]*)<title[ >]`)
 )
+
+// defaultIndent — на случай файла без <title> (теоретически возможен,
+// практически не встречался). Четыре пробела — то, что пишут и Kodi,
+// и tinyMediaManager.
+const defaultIndent = "    "
 
 type providerMeta struct {
 	KodiName string
@@ -147,11 +160,15 @@ func NormalizeEntry(e RatingEntry) RatingEntry {
 	return e
 }
 
+// BuildRatingsBlock собирает блок <ratings>. Вложенность строится из того
+// же indent, что найден в файле: если файл сделан двумя пробелами, блок
+// тоже будет по два, а не по четыре.
 func BuildRatingsBlock(entries []RatingEntry, indent string) (string, error) {
 	if len(entries) == 0 {
 		return "", fmt.Errorf("build ratings block: no entries")
 	}
-	inner := indent + "    "
+	inner := indent + indent
+	deep := inner + indent
 
 	var b strings.Builder
 	b.WriteString(indent)
@@ -172,13 +189,13 @@ func BuildRatingsBlock(entries []RatingEntry, indent string) (string, error) {
 
 		b.WriteString(inner)
 		b.WriteString(fmt.Sprintf("<rating %s>\n", attrs))
-		b.WriteString(inner)
-		b.WriteString("    <value>")
+		b.WriteString(deep)
+		b.WriteString("<value>")
 		b.WriteString(normalizeValue(e.Value, max))
 		b.WriteString("</value>\n")
 		if e.Votes > 0 && !noVotes {
-			b.WriteString(inner)
-			b.WriteString(fmt.Sprintf("    <votes>%d</votes>\n", e.Votes))
+			b.WriteString(deep)
+			b.WriteString(fmt.Sprintf("<votes>%d</votes>\n", e.Votes))
 		}
 		b.WriteString(inner)
 		b.WriteString("</rating>\n")
@@ -191,13 +208,13 @@ func BuildRatingsBlock(entries []RatingEntry, indent string) (string, error) {
 // MergeRatings склеивает свежие данные с тем, что уже лежит в файле.
 //
 // Правила:
-//   - источник получен в этом прогоне    -> берём свежее значение;
-//   - источник включён, но данных нет    -> сохраняем старое из файла,
+//   - источник получен в этом прогоне -> берём свежее значение;
+//   - источник включён, но данных нет -> сохраняем старое из файла,
 //     чтобы неудачный прогон (например, выбыли ключи MDBList) не стирал
 //     рейтинги, собранные ранее;
-//   - источник отключён в конфиге        -> удаляем, это явное указание
+//   - источник отключён в конфиге -> удаляем, это явное указание
 //     пользователя, а не отсутствие данных;
-//   - запись чужая и нам неизвестна      -> переносим дословно в хвост.
+//   - запись чужая и нам неизвестна -> переносим дословно в хвост.
 //
 // Атрибут default здесь снимается со всех записей: его расставляет
 // ChooseDefaultRating уже после слияния.
@@ -266,23 +283,40 @@ func RatingsEqual(a, b []RatingEntry) bool {
 	return true
 }
 
+// DetectIndent определяет отступ верхнего уровня по строке с <title>.
+//
+// Именно по <title>, а не по первой попавшейся строке: он гарантированно
+// лежит непосредственно внутри корневого тега (<movie>, <tvshow>,
+// <episodedetails>), поэтому его отступ — это ровно один уровень
+// вложенности, тот самый, на который встают все наши вставки.
 func DetectIndent(content string) string {
 	if m := reTopLevelIndent.FindStringSubmatch(content); m != nil {
 		return m[1]
 	}
-	return "    "
+	return defaultIndent
 }
 
+// insertAfterAnchor вставляет готовый блок сразу после </originaltitle>
+// (или после </title>, если первого в файле нет).
+//
+// Якорь намеренно НЕ захватывает пробелы после тега. Раньше регулярки
+// оканчивались на \s*, то есть съедали перевод строки вместе с отступом
+// СЛЕДУЮЩЕЙ строки, а обратно его не возвращали — соседний тег оказывался
+// в нулевой колонке. Хуже того, вставок за прогон несколько и все они
+// метят в одну точку, так что потеря накапливалась: каждая следующая
+// вставка вставала на место, оставшееся от предыдущей.
+//
+// Теперь после тега не трогается ничего: собственный перевод строки
+// и отступ следующей строки остаются на месте, а мы дописываем свой
+// перевод строки ПЕРЕД блоком.
 func insertAfterAnchor(content, block string) string {
-	insertion := "\n" + block + "\n"
-
 	if loc := reOriginalTitleEnd.FindStringIndex(content); loc != nil {
-		return content[:loc[1]] + strings.TrimLeft(insertion, "\n") + content[loc[1]:]
+		return content[:loc[1]] + "\n" + block + content[loc[1]:]
 	}
 	if loc := reTitleEnd.FindStringIndex(content); loc != nil {
-		return content[:loc[1]] + strings.TrimLeft(insertion, "\n") + content[loc[1]:]
+		return content[:loc[1]] + "\n" + block + content[loc[1]:]
 	}
-	return strings.TrimRight(content, "\n") + insertion
+	return strings.TrimRight(content, "\n") + "\n" + block + "\n"
 }
 
 func ReplaceOrInsertRatings(content, newBlock string) string {

@@ -19,12 +19,18 @@ import (
 //     увидеть настоящую проблему. Включаются через LOG_VERBOSE=yes —
 //     временно, для диагностики конкретной ситуации.
 //   - Event — значимые события (ошибки, pending, бэкапы, фолбэк рейтинга,
-//     circuit breaker, старт/конец прогона, reload, итоговая сводка).
+//     circuit breaker, старт/конец прогона, reload).
 //     Пишутся всегда, и в файл, и в консоль (stdout/docker logs/journald).
 type Logger struct {
-	detail  *log.Logger
-	event   *log.Logger
-	verbose bool
+	file    io.Writer
+	console io.Writer
+
+	detail      *log.Logger
+	event       *log.Logger
+	consoleOnly *log.Logger
+
+	consoleTTY bool
+	verbose    bool
 }
 
 // New создаёт Logger поверх двух приёмников, любой из которых может быть nil:
@@ -54,11 +60,42 @@ func New(fileWriter, consoleWriter io.Writer, verbose bool) *Logger {
 		eventWriter = io.Discard
 	}
 
-	return &Logger{
-		detail:  log.New(detailWriter, "", log.LstdFlags),
-		event:   log.New(eventWriter, "", log.LstdFlags),
-		verbose: verbose,
+	consoleOnlyWriter := io.Writer(io.Discard)
+	if consoleWriter != nil {
+		consoleOnlyWriter = consoleWriter
 	}
+
+	return &Logger{
+		file:        fileWriter,
+		console:     consoleWriter,
+		detail:      log.New(detailWriter, "", log.LstdFlags),
+		event:       log.New(eventWriter, "", log.LstdFlags),
+		consoleOnly: log.New(consoleOnlyWriter, "", log.LstdFlags),
+		consoleTTY:  isTerminal(consoleWriter),
+		verbose:     verbose,
+	}
+}
+
+// isTerminal отличает живой терминал от трубы, сокета или файла.
+//
+// Нужно ровно для одного решения — печатать ли многострочную сводку
+// в консоль. Под systemd stdout это сокет journald, и блок с рамкой
+// превратился бы там в десяток отдельных записей, часть из которых
+// пустые. У терминала же обратная логика: его читает человек, и рамка
+// ему помогает.
+//
+// Проверка через ModeCharDevice — стандартный для Go способ, не требующий
+// внешних зависимостей.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 // Detail — рутинное событие. Ничего не делает, если LOG_VERBOSE=no
@@ -73,6 +110,34 @@ func (l *Logger) Detail(format string, args ...any) {
 // Event — значимое событие, всегда в файл и в консоль.
 func (l *Logger) Event(format string, args ...any) {
 	l.event.Printf(format, args...)
+}
+
+// Summary печатает итог прогона в двух видах сразу.
+//
+// block — многострочная сводка с рамкой, пишется БЕЗ метки времени и
+// только в файл: метка от log.Printf ставится в начало всего сообщения
+// и превращала бы первую строку блока в одинокую дату.
+//
+// line — та же сводка одной строкой вида key=value. Уходит в консоль,
+// то есть в journald или docker logs, где многострочные блоки неуместны:
+// каждая строка там становится отдельной записью, пустые строки — пустыми
+// записями, а grep по такому не работает вовсе.
+//
+// Исключение — интерактивный запуск: если консоль это терминал, человек
+// читает вывод глазами, и ему полезнее блок. Тогда однострочный вариант
+// не печатается, чтобы не дублировать одно и то же дважды подряд.
+func (l *Logger) Summary(block, line string) {
+	if l.file != nil {
+		fmt.Fprintf(l.file, "\n%s\n\n", block)
+	}
+	if l.console == nil {
+		return
+	}
+	if l.consoleTTY {
+		fmt.Fprintf(l.console, "\n%s\n\n", block)
+		return
+	}
+	l.consoleOnly.Print(line)
 }
 
 // Имя файла лога: префикс приложения + сортируемый timestamp. Формат времени

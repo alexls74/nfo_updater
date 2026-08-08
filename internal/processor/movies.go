@@ -33,6 +33,43 @@ type Deps struct {
 	quotaWarned map[string]bool
 }
 
+// fetchOutcome — ПОЧЕМУ рейтингов не оказалось. Раньше все причины
+// сливались в одно сообщение "no rating found from any provider", и это
+// дорого обошлось: неверный ID в файле выглядел точно так же, как отказ
+// сети, и заставлял искать неисправность там, где её не было.
+//
+// Разница между исходами — не в оттенках формулировки, а в том, что
+// пользователю с этим делать: чинить файл, ждать следующего прогона или
+// не делать ничего вовсе.
+type fetchOutcome int
+
+const (
+	fetchOK          fetchOutcome = iota // значения получены
+	fetchUnavailable                     // провайдеры не ответили: сеть, квота, circuit breaker
+	fetchIDUnknown                       // провайдеры ответили: тайтла с таким ID у них нет
+	fetchNoRatings                       // тайтл есть, но рейтингов у него нет
+	fetchNoProvider                      // ни один настроенный провайдер не умеет искать по этим ID
+)
+
+// describe возвращает текст для лога и признак, надо ли записывать тайтл
+// в таблицу pending.
+//
+// При fetchUnavailable запись НЕ делается: провайдеры молчали по причинам,
+// к файлу отношения не имеющим, и заносить тайтл в список безнадёжных
+// значило бы записать временный сбой сети как свойство медиатеки.
+func (o fetchOutcome) describe() (reason string, persist bool) {
+	switch o {
+	case fetchIDUnknown:
+		return "no provider knows this id — it is most likely wrong in the file, check it against the title page on imdb.com", true
+	case fetchNoRatings:
+		return "the title is known to the providers but has no ratings yet — nothing to fix, this is normal for new releases and short films", true
+	case fetchNoProvider:
+		return "none of the configured providers can look up this combination of ids", true
+	default:
+		return "providers could not be reached during this run — nothing to fix in the file, it will be retried next run", false
+	}
+}
+
 func enabledSources(cfg *config.Config) map[string]bool {
 	return map[string]bool{
 		"imdb":       cfg.IMDbRating,
@@ -41,6 +78,23 @@ func enabledSources(cfg *config.Config) map[string]bool {
 		"tomatoes":   cfg.TomatoesRating,
 		"popcorn":    cfg.PopcornRating,
 		"metacritic": cfg.MetacriticRating,
+	}
+}
+
+// idsLabel — короткое обозначение тайтла для сообщений об ошибках
+// провайдеров. Пути файла на этом уровне нет (fetchRatingsWithFallback
+// работает с ID, а не с файлами), а без опознавательного знака строка
+// "mdblist: timeout" не даёт понять, на каком тайтле споткнулись.
+func idsLabel(ids providers.IDs) string {
+	switch {
+	case ids.IMDb != "":
+		return ids.IMDb
+	case ids.TMDb != "":
+		return "tmdb:" + ids.TMDb
+	case ids.TVDb != "":
+		return "tvdb:" + ids.TVDb
+	default:
+		return "unknown title"
 	}
 }
 
@@ -76,13 +130,16 @@ func ProcessMovieFile(ctx context.Context, deps *Deps, path string) error {
 	newContent := content
 
 	if !ids.Empty() {
-		combined, fresh := fetchRatingsWithFallback(ctx, deps, ids, providers.MediaTypeMovie)
+		combined, fresh, outcome := fetchRatingsWithFallback(ctx, deps, ids, providers.MediaTypeMovie)
 
 		var ratingsChanged bool
 		if len(combined) == 0 {
+			reason, persist := outcome.describe()
 			deps.Stats.IncPending()
-			_ = deps.DB.MarkPending(imdbID, tmdbID, "", "no provider returned a value and no cached value available")
-			deps.Logger.Event("[PENDING] %s: no rating found from any provider, no cached value either", path)
+			if persist {
+				_ = deps.DB.MarkPending(imdbID, tmdbID, "", reason)
+			}
+			deps.Logger.Event("[PENDING] %s: %s", path, reason)
 			newContent, ratingsChanged = nfo.EnsureEmptyUserRating(newContent)
 		} else {
 			_ = deps.DB.ClearPending(imdbID, tmdbID, "")
@@ -136,10 +193,17 @@ func ProcessMovieFile(ctx context.Context, deps *Deps, path string) error {
 		}
 	}
 
-	if deps.Config.EmbyEnabled {
-		var embyChanged bool
-		newContent, embyChanged = nfo.FixEmbyActorOrder(newContent)
-		changed = changed || embyChanged
+	// Порядок <credits>/<director> относительно <actor> — вопрос вида
+	// карточки в Emby, а не корректности данных, поэтому решает отдельный
+	// флаг, а не настройка медиасервера: см. nfo.FixEmbyActorOrder.
+	//
+	// Правка стоит ВНЕ ветки !ids.Empty(): она не требует ни ID, ни сети,
+	// и файл без опознавательных знаков в порядке тегов нуждается ровно
+	// так же, как любой другой.
+	if deps.Config.CrewOrderFix {
+		var crewChanged bool
+		newContent, crewChanged = nfo.FixEmbyActorOrder(newContent)
+		changed = changed || crewChanged
 	}
 
 	return finishFile(deps, path, raw, newContent, changed)
@@ -211,6 +275,30 @@ func recordMissing(deps *Deps, ids providers.IDs, wanted map[string]bool, combin
 	}
 }
 
+// classifyFetch определяет исход опроса провайдеров.
+//
+// Порядок веток важен. Недоступность проверяется раньше всего: если хоть
+// что-то помешало опросу, судить о существовании тайтла мы не вправе.
+// fetchNoRatings идёт раньше fetchIDUnknown потому, что "один провайдер
+// не знает тайтл, другой знает, но рейтингов не имеет" означает, что тайтл
+// всё-таки существует, и посылать человека проверять ID было бы враньём.
+func classifyFetch(conclusive, answered, sawNotFound, sawNoRatings, gotValues bool) fetchOutcome {
+	switch {
+	case gotValues:
+		return fetchOK
+	case !conclusive:
+		return fetchUnavailable
+	case sawNoRatings:
+		return fetchNoRatings
+	case sawNotFound:
+		return fetchIDUnknown
+	case !answered:
+		return fetchNoProvider
+	default:
+		return fetchNoRatings
+	}
+}
+
 // fetchRatingsWithFallback собирает значения для включённых в конфиге
 // источников. Порядок действий:
 //
@@ -223,13 +311,15 @@ func recordMissing(deps *Deps, ids providers.IDs, wanted map[string]bool, combin
 //  4. Оставшиеся дыры добираем из того же (уже загруженного) кэша,
 //     независимо от его возраста: устаревшее значение лучше пустого.
 //
-// Возвращает ДВА набора:
+// Возвращает ТРИ значения:
 //   - combined — всё, что удалось собрать, для записи в .nfo;
-//   - fresh — только пришедшее от провайдеров, для записи в кэш.
+//   - fresh — только пришедшее от провайдеров, для записи в кэш;
+//   - outcome — почему combined пуст, если он пуст.
 //
-// Разделение принципиально: обратная запись кэшированного значения обновила
-// бы updated_at, и запись выглядела бы вечно свежей для гейта из пункта 1.
-func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs, mediaType string) (combined, fresh providers.FetchResult) {
+// Разделение combined и fresh принципиально: обратная запись кэшированного
+// значения обновила бы updated_at, и запись выглядела бы вечно свежей для
+// гейта из пункта 1.
+func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs, mediaType string) (combined, fresh providers.FetchResult, outcome fetchOutcome) {
 	wanted := enabledSources(deps.Config)
 	combined = make(providers.FetchResult)
 	fresh = make(providers.FetchResult)
@@ -247,7 +337,12 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 		}
 		deps.Stats.IncFromCache()
 		deps.Logger.Detail("[CACHE_HIT] all requested sources are cached and fresh, skipping providers")
-		return combined, fresh
+		if len(combined) == 0 {
+			// Кэш покрыт целиком негативными пометками: мы уже спрашивали,
+			// значений нет. Это знание о тайтле, а не о сбое.
+			return combined, fresh, fetchNoRatings
+		}
+		return combined, fresh, fetchOK
 	}
 
 	remaining := func() bool {
@@ -266,6 +361,8 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 	// как "рейтинга не существует".
 	conclusive := true
 	answered := false
+	sawNotFound := false
+	sawNoRatings := false
 
 	for _, p := range deps.Providers {
 		if !remaining() {
@@ -292,7 +389,16 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 				}
 			}
 		case err == providers.ErrNotFound:
+			// Сервис прямо сказал: тайтла с таким ID у него нет.
 			answered = true
+			sawNotFound = true
+			deps.Breaker.RecordSuccess(p.Name())
+			deps.Stats.IncProviderRequest(p.Name())
+		case err == providers.ErrNoRatings:
+			// Тайтл есть, оценок к нему нет. Ответ такой же полноценный,
+			// как значение, — для breaker'а и счётчика это успех.
+			answered = true
+			sawNoRatings = true
 			deps.Breaker.RecordSuccess(p.Name())
 			deps.Stats.IncProviderRequest(p.Name())
 		case err == providers.ErrQuotaExhausted:
@@ -305,6 +411,16 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 			// этот провайдер просто не годится для данной комбинации ID, не сбой
 		case providers.IsNetworkError(err):
 			conclusive = false
+			// Текст ошибки пишем ВСЕГДА и на уровне Event. Раньше здесь
+			// не было ни одной записи, и молчаливый переход на следующего
+			// провайдера выглядел в логе как нормальная работа: узнать
+			// о сбое можно было только по счётчику запросов в сводке,
+			// а причину — вообще никак, она нигде не сохранялась.
+			//
+			// Утопить лог это не может: после пяти отказов подряд circuit
+			// breaker гасит провайдера, Allowed() возвращает false, и до
+			// конца прогона запросов к нему больше не делается.
+			deps.Logger.Event("[PROVIDER_ERROR] %s (%s): %v", p.Name(), idsLabel(ids), err)
 			tripped := deps.Breaker.RecordNetworkFailure(p.Name())
 			if tripped {
 				deps.Logger.Event("[PROVIDER_DOWN] %s: tripped after repeated network failures, disabled for the rest of this run", p.Name())
@@ -313,7 +429,15 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 		}
 	}
 
-	if conclusive && answered {
+	// Классифицируем ДО добора из кэша: исход описывает, что ответили
+	// провайдеры, а не что в итоге удалось наскрести.
+	outcome = classifyFetch(conclusive, answered, sawNotFound, sawNoRatings, len(combined) > 0)
+
+	// Негативные пометки при неизвестном ID не ставим. Толку от них нет —
+	// тайтла не существует, — а вреда много: на следующем прогоне кэш-гейт
+	// счёл бы такой тайтл полностью покрытым, провайдеров бы не спросил,
+	// и подсказка про неверный ID из лога исчезла бы навсегда.
+	if outcome != fetchIDUnknown && conclusive && answered {
 		recordMissing(deps, ids, wanted, combined, cached)
 	}
 
@@ -328,5 +452,10 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 			}
 		}
 	}
-	return combined, fresh
+
+	// Кэш мог закрыть дыру уже после классификации.
+	if len(combined) > 0 {
+		outcome = fetchOK
+	}
+	return combined, fresh, outcome
 }

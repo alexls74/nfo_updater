@@ -119,7 +119,7 @@ func processShowNFO(ctx context.Context, deps *Deps, path string) (providers.IDs
 		deps.Logger.Event("[NO_ACCESS] %s: %v, show file skipped (episodes will still be processed)", path, writable)
 	}
 
-	showRatings, freshRatings, episodeRatings := fetchShowRatings(ctx, deps, ids)
+	showRatings, freshRatings, episodeRatings, outcome := fetchShowRatings(ctx, deps, ids)
 
 	// Запрос к сериалу нужен в любом случае — из него берутся рейтинги
 	// серий, — но правку и запись самого tvshow.nfo при отсутствии прав
@@ -132,9 +132,12 @@ func processShowNFO(ctx context.Context, deps *Deps, path string) (providers.IDs
 	var changed bool
 
 	if len(showRatings) == 0 {
+		reason, persist := outcome.describe()
 		deps.Stats.IncPending()
-		_ = deps.DB.MarkPending(imdbID, tmdbID, tvdbID, "no provider returned a value for this show and no cached value available")
-		deps.Logger.Event("[PENDING] %s: no rating found from any provider, no cached value either", path)
+		if persist {
+			_ = deps.DB.MarkPending(imdbID, tmdbID, tvdbID, reason)
+		}
+		deps.Logger.Event("[PENDING] %s: %s", path, reason)
 		var c bool
 		newContent, c = nfo.EnsureEmptyUserRating(newContent)
 		changed = changed || c
@@ -190,7 +193,9 @@ func processShowNFO(ctx context.Context, deps *Deps, path string) (providers.IDs
 		}
 	}
 
-	if deps.Config.EmbyEnabled {
+	// Порядок съёмочной группы относительно актёров — под своим флагом,
+	// см. nfo.FixEmbyActorOrder и CREW_ORDER_FIX в config.conf.
+	if deps.Config.CrewOrderFix {
 		var c bool
 		newContent, c = nfo.FixEmbyActorOrder(newContent)
 		changed = changed || c
@@ -234,6 +239,11 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 	var votes int
 	var found bool
 
+	// Исход по умолчанию — на случай, когда серии нет ни в таблице от
+	// MDBList, ни собственного imdb id у неё нет: спрашивать оказалось
+	// некого, и это не сбой провайдеров.
+	outcome := fetchNoProvider
+
 	key := fmt.Sprintf("%d:%d", season, episode)
 	if r, ok := episodeRatings[key]; ok {
 		value, votes, found = r.Value, r.Votes, true
@@ -244,7 +254,8 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 		}
 	} else if episodeIMDbID != "" {
 		ids := providers.IDs{IMDb: episodeIMDbID}
-		res, fresh := fetchRatingsWithFallback(ctx, deps, ids, providers.MediaTypeEpisode)
+		res, fresh, o := fetchRatingsWithFallback(ctx, deps, ids, providers.MediaTypeEpisode)
+		outcome = o
 		if r, ok := res["imdb"]; ok {
 			value, votes, found = r.Value, r.Votes, true
 		}
@@ -257,11 +268,12 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 	var changed bool
 
 	if !found {
+		reason, persist := outcome.describe()
 		deps.Stats.IncPending()
-		if episodeIMDbID != "" {
-			_ = deps.DB.MarkPending(episodeIMDbID, "", "", "no rating found for this episode")
+		if persist && episodeIMDbID != "" {
+			_ = deps.DB.MarkPending(episodeIMDbID, "", "", reason)
 		}
-		deps.Logger.Event("[PENDING] %s: no episode-level rating found", path)
+		deps.Logger.Event("[PENDING] %s: %s", path, reason)
 		var c bool
 		newContent, c = nfo.EnsureEmptyUserRating(newContent)
 		changed = changed || c
@@ -293,7 +305,7 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 		newContent, idsChanged = nfo.FixLegacyUniqueIDs(newContent, episodeIMDbID, "")
 		changed = changed || idsChanged
 	}
-	if deps.Config.EmbyEnabled {
+	if deps.Config.CrewOrderFix {
 		var c bool
 		newContent, c = nfo.FixEmbyActorOrder(newContent)
 		changed = changed || c
@@ -312,9 +324,9 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 // рейтингов серий, а без неё каждую серию пришлось бы запрашивать
 // отдельно — то есть экономия одного запроса обернулась бы десятками.
 //
-// Возвращает два набора: show (всё, что есть, для записи в файл) и fresh
-// (только полученное от провайдеров, для записи в кэш).
-func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show, fresh providers.FetchResult, episodes map[string]providers.EpisodeRating) {
+// Возвращает show (всё, что есть, для записи в файл), fresh (только
+// полученное от провайдеров, для записи в кэш), таблицу серий и исход.
+func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show, fresh providers.FetchResult, episodes map[string]providers.EpisodeRating, outcome fetchOutcome) {
 	for _, p := range deps.Providers {
 		mdb, isMDBList := p.(*providers.MDBListProvider)
 		if !isMDBList || !deps.Breaker.Allowed(p.Name()) {
@@ -333,8 +345,8 @@ func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show,
 				}
 			}
 			// Всё пришло по сети, поэтому show и fresh здесь совпадают.
-			return filtered, filtered, episodesRes
-		case err == providers.ErrNotFound:
+			return filtered, filtered, episodesRes, fetchOK
+		case err == providers.ErrNotFound, err == providers.ErrNoRatings:
 			deps.Breaker.RecordSuccess(p.Name())
 			deps.Stats.IncProviderRequest(p.Name())
 		case err == providers.ErrQuotaExhausted:
@@ -343,6 +355,13 @@ func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show,
 				deps.Logger.Event("[QUOTA_EXHAUSTED] %s: daily quota exhausted, falling back to cached values for the rest of this run", p.Name())
 			}
 		case providers.IsNetworkError(err):
+			// Та же запись, что и в fetchRatingsWithFallback, и по той же
+			// причине. Без неё сбой на этой ветке не оставлял в логе следа
+			// вовсе: сериал молча уходил на общий путь через OMDb, а прогон
+			// при этом стоил лишних двадцати секунд. Обнаружился он только
+			// по сдвигу ключей в round-robin — цена молчания в этом месте
+			// оказалась выше, чем казалось.
+			deps.Logger.Event("[PROVIDER_ERROR] %s (%s): %v", p.Name(), idsLabel(ids), err)
 			if deps.Breaker.RecordNetworkFailure(p.Name()) {
 				deps.Logger.Event("[PROVIDER_DOWN] %s: tripped after repeated network failures, disabled for the rest of this run", p.Name())
 			}
@@ -351,8 +370,11 @@ func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show,
 		break
 	}
 
-	show, fresh = fetchRatingsWithFallback(ctx, deps, ids, providers.MediaTypeShow)
-	return show, fresh, nil
+	// Сюда попадаем, если MDBList не дал результата. Общий путь опросит
+	// провайдеров ещё раз и сам классифицирует исход — таблицы серий
+	// на этом пути уже не будет, серии придётся добирать поштучно.
+	show, fresh, outcome = fetchRatingsWithFallback(ctx, deps, ids, providers.MediaTypeShow)
+	return show, fresh, nil, outcome
 }
 
 // finishFile — общая для фильмов, tvshow.nfo и файлов серий финальная часть:

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"nfo_updater/internal/version"
@@ -17,6 +18,23 @@ var defaultConfigTemplate string
 
 var reKeyLine = regexp.MustCompile(`(?m)^([A-Z_][A-Z0-9_]*)=(.*)$`)
 var reVersionLine = regexp.MustCompile(`(?m)^VERSION=.*$`)
+
+// backupSuffix — расширение резервной копии, которая создаётся перед
+// перезаписью конфига.
+const backupSuffix = ".bak"
+
+// managedKeys — параметры, которыми распоряжается сама программа, а не
+// пользователь. В переносе значений они не участвуют вовсе.
+//
+// VERSION попал сюда после ложной тревоги: в шаблоне config.conf его нет
+// (строку дописывает setVersion уже при записи файла), поэтому миграция
+// находила ключ в старом конфиге, не находила пары в шаблоне и объявляла
+// его выброшенным — хотя следующей же операцией проставляла актуальное
+// значение. Сообщение всплывало после каждой пересборки и выглядело как
+// потеря настройки.
+var managedKeys = map[string]bool{
+	"VERSION": true,
+}
 
 // ErrConfigCreated — сентинел: файла конфига не было, только что создан
 // шаблон по умолчанию. main.go должен вывести дружелюбное сообщение
@@ -49,53 +67,199 @@ func EnsureConfig(path string) (string, error) {
 		)
 	}
 
-	migrated, dropped := transplantValues(defaultConfigTemplate, content)
+	migrated, dropped := applyValues(defaultConfigTemplate, userValues(content))
 	migrated = setVersion(migrated, version.Version)
 
-	if err := os.WriteFile(path, []byte(migrated), 0o644); err != nil {
+	// Режим определяется по оригиналу и применяется к обоим файлам.
+	// Конфиг содержит ключи API: копия не должна оказаться доступнее
+	// исходника, а мигрированный файл — потерять затянутые пользователем
+	// права (раньше он безусловно писался с 0644, распуская chmod 600).
+	mode := configFileMode(path)
+
+	// Копия делается ДО перезаписи и БЕЗУСЛОВНО, а не только когда что-то
+	// выброшено. Повод — реальный случай: битый (обрезанный при вставке)
+	// шаблон не содержал половины ключей, миграция честно сообщила о них
+	// как о выброшенных, но живые ключи API к тому моменту уже были
+	// затёрты, и вернуть их было неоткуда. Ошибка в шаблоне о себе заранее
+	// не заявляет, поэтому страховка нужна на каждый проход.
+	//
+	// Неудача копирования ОТМЕНЯЕТ миграцию: писать поверх файла, который
+	// не удалось сохранить, — ровно то, от чего эта копия и защищает.
+	bakPath, err := backupConfig(path, raw, mode)
+	if err != nil {
+		return "", fmt.Errorf("cannot back up the existing config before migrating it: %w", err)
+	}
+
+	if err := os.WriteFile(path, []byte(migrated), mode); err != nil {
 		return "", fmt.Errorf("write migrated config: %w", err)
 	}
+	// WriteFile не меняет режим уже существующего файла, поэтому права
+	// проставляются явно.
+	if err := os.Chmod(path, mode); err != nil {
+		return "", fmt.Errorf("set permissions on migrated config: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "[CONFIG_MIGRATION] config updated to version %s, the previous one was kept as %s\n",
+		version.Version, bakPath)
+
 	if len(dropped) > 0 {
 		fmt.Fprintf(os.Stderr, "[CONFIG_MIGRATION] the following keys had values in your old config but no longer exist in version %s and were dropped: %s\n",
 			version.Version, strings.Join(dropped, ", "))
+		fmt.Fprintf(os.Stderr, "[CONFIG_MIGRATION] if that list is unexpected, the old values are still in %s\n",
+			bakPath)
 	}
 	return migrated, nil
 }
 
+// WriteConfig создаёт конфиг из встроенного шаблона, подставив переданные
+// значения. Используется мастером настройки (--setup).
+//
+// Мастер намеренно НЕ сериализует конфиг сам: формат файла существует
+// физически в одном месте — в шаблоне, — и написанный мастером файл не может
+// разойтись с мигрированным ни порядком ключей, ни комментариями, ни правами.
+//
+// Пустая строка в values — это осмысленный ответ "оставить умолчание",
+// а не отсутствие ответа: строка DATABASE_PATH= означает ровно то же, что
+// и в свежем шаблоне. Поэтому значения подставляются как есть, а решение
+// не спрашивать о чём-то принимает вызывающий, просто не кладя ключ в карту.
+//
+// Существующий файл сохраняется в .bak и наследует свои права — те же
+// правила, что при миграции: конфиг с ключами API нельзя ни потерять,
+// ни сделать доступнее, чем его сделал пользователь.
+func WriteConfig(path string, values map[string]string) error {
+	content, unknown := applyValues(defaultConfigTemplate, values)
+	if len(unknown) > 0 {
+		// Ключа нет в шаблоне — это ошибка программиста, а не пользователя:
+		// опечатка в имени параметра тихо потеряла бы введённое значение.
+		return fmt.Errorf("internal error: no such settings in the config template: %s",
+			strings.Join(unknown, ", "))
+	}
+	content = setVersion(content, version.Version)
+
+	// 0700 на каталоге — там лежат четыре набора ключей API. MkdirAll
+	// применяет режим только к тем каталогам, которые создаёт сам, так что
+	// уже существующий ~/.config останется с прежними правами.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+
+	mode := os.FileMode(0o600)
+	old, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		mode = configFileMode(path)
+		if _, err := backupConfig(path, old, mode); err != nil {
+			return fmt.Errorf("cannot back up the existing config before rewriting it: %w", err)
+		}
+	case !os.IsNotExist(err):
+		return fmt.Errorf("read existing config: %w", err)
+	}
+
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	// WriteFile не меняет режим уже существующего файла.
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("set permissions on config: %w", err)
+	}
+	return nil
+}
+
+// configFileMode — права существующего конфига. При неудаче stat берутся
+// заведомо строгие 0600, а не привычные 0644: файл с ключами лучше сделать
+// теснее, чем нужно, чем шире.
+func configFileMode(path string) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return 0o600
+}
+
+// backupConfig сохраняет содержимое конфига рядом с ним же, под тем же
+// именем с суффиксом .bak. Возвращает путь копии для сообщения пользователю.
+//
+// Копия ровно одна и перезаписывается при каждой перезаписи конфига.
+// Городить ротацию незачем: ценность представляет последнее состояние,
+// которое пользователь заполнял руками.
+func backupConfig(path string, content []byte, mode os.FileMode) (string, error) {
+	bakPath := path + backupSuffix
+
+	if err := os.WriteFile(bakPath, content, mode); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(bakPath, mode); err != nil {
+		return "", err
+	}
+	return bakPath, nil
+}
+
+// writeDefaultConfig создаёт конфиг из шаблона при первом запуске.
+//
+// Права 0600, а не 0644: файл предназначен для четырёх наборов ключей API,
+// и раздавать его на чтение всей системе незачем. Это то же соображение,
+// по которому configFileMode при неудачном stat берёт 0600, — здесь оно
+// раньше не соблюдалось, пока конфиг жил в /etc и заводился установщиком.
+//
+// Через WriteConfig не выражено намеренно: там есть чтение и копирование
+// существующего файла, а здесь заведомо нечего копировать — путь вызывается
+// только когда os.ReadFile вернул "не существует".
 func writeDefaultConfig(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	content := setVersion(defaultConfigTemplate, version.Version)
-	return os.WriteFile(path, []byte(content), 0o644)
+	return os.WriteFile(path, []byte(content), 0o600)
 }
 
-func transplantValues(template, oldContent string) (result string, dropped []string) {
-	oldValues := make(map[string]string)
-	for _, m := range reKeyLine.FindAllStringSubmatch(oldContent, -1) {
-		key, val := m[1], m[2]
-		if val != "" {
-			oldValues[key] = val
-		}
-	}
+// applyValues подставляет значения в шаблон по именам ключей и возвращает
+// те ключи из values, которым в шаблоне не нашлось строки.
+//
+// Общий примитив для двух операций, которые иначе писали бы формат файла
+// каждая по-своему: миграция берёт значения из старого конфига, мастер —
+// из ответов пользователя. Смысл несовпавших ключей у них разный (для
+// миграции это выброшенный параметр, для мастера — ошибка в коде), поэтому
+// решение о том, что с ними делать, принимает вызывающий.
+//
+// Список несовпавших сортируется: обход map даёт случайный порядок, и одно
+// и то же сообщение об ошибке выглядело бы каждый раз иначе.
+func applyValues(template string, values map[string]string) (result string, unknown []string) {
+	used := make(map[string]bool, len(values))
 
-	usedKeys := make(map[string]bool)
 	result = reKeyLine.ReplaceAllStringFunc(template, func(line string) string {
 		m := reKeyLine.FindStringSubmatch(line)
 		key := m[1]
-		if val, ok := oldValues[key]; ok {
-			usedKeys[key] = true
-			return key + "=" + val
+		val, ok := values[key]
+		if !ok {
+			return line
 		}
-		return line
+		used[key] = true
+		return key + "=" + val
 	})
 
-	for key := range oldValues {
-		if !usedKeys[key] {
-			dropped = append(dropped, key)
+	for key := range values {
+		if !used[key] {
+			unknown = append(unknown, key)
 		}
 	}
-	return result, dropped
+	sort.Strings(unknown)
+	return result, unknown
+}
+
+// userValues вытаскивает из текста конфига значения, заданные пользователем.
+//
+// Пустые значения пропускаются: в старом файле они означают "умолчание",
+// и переносить их поверх шаблона незачем — там на их месте стоит ровно то же
+// самое. Служебные ключи (см. managedKeys) не переносятся никогда.
+func userValues(content string) map[string]string {
+	out := make(map[string]string)
+	for _, m := range reKeyLine.FindAllStringSubmatch(content, -1) {
+		key, val := m[1], m[2]
+		if managedKeys[key] || val == "" {
+			continue
+		}
+		out[key] = val
+	}
+	return out
 }
 
 func extractVersion(content string) string {
