@@ -8,17 +8,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"nfo_updater/internal/config"
 	"nfo_updater/internal/daemon"
 	"nfo_updater/internal/db"
+	"nfo_updater/internal/exitcode"
 	"nfo_updater/internal/lock"
 	"nfo_updater/internal/logging"
 	"nfo_updater/internal/processor"
 	"nfo_updater/internal/providers"
 	"nfo_updater/internal/scheduler"
+	"nfo_updater/internal/setup"
+	"nfo_updater/internal/unit"
 	"nfo_updater/internal/version"
 )
 
@@ -32,16 +36,6 @@ import (
 // определить не удалось; этот случай разбирается в run().
 var defaultConfigPath = config.DefaultConfigPath()
 
-// Коды возврата. Разделены, чтобы systemd и скрипты могли отличать
-// "сломан конфиг" (чинить руками) от "прогон не удался" (можно повторить)
-// и от "уже работает" (не ошибка вовсе).
-const (
-	exitOK     = 0
-	exitError  = 1
-	exitConfig = 2
-	exitBusy   = 3
-)
-
 func main() {
 	os.Exit(run())
 }
@@ -52,6 +46,8 @@ func run() int {
 		showInfo    bool
 		showVersion bool
 		checkConfig bool
+		setupMode   bool
+		printUnit   string
 		showHelp    bool
 		configPath  string
 	)
@@ -68,6 +64,16 @@ func run() int {
 	// разработки и разбора проблем. Обычному пользователю хватает того, что
 	// обычный запуск сам проверит конфиг и ключи перед началом работы.
 	fs.BoolVar(&checkConfig, "check-config", false, "")
+	fs.BoolVar(&setupMode, "setup", false, "")
+	// --print-unit тоже не документирован в -h, и по той же причине, что
+	// --check-config: он адресован установочному скрипту, а не человеку.
+	// В справке он породил бы вопрос "куда мне девать этот текст", ответ
+	// на который — "никуда, скрипт сам".
+	//
+	// Путь к бинарнику приходит аргументом флага, а не позиционным: при
+	// установке юнит генерирует бинарник, лежащий ещё во временном каталоге,
+	// так что os.Executable() указал бы в никуда.
+	fs.StringVar(&printUnit, "print-unit", "", "")
 	fs.BoolVar(&showHelp, "h", false, "")
 	fs.BoolVar(&showHelp, "help", false, "")
 	fs.StringVar(&configPath, "config", defaultConfigPath, "")
@@ -75,11 +81,11 @@ func run() int {
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n\n", err)
 		usage(os.Stderr)
-		return exitError
+		return exitcode.Error
 	}
 	if showHelp {
 		usage(os.Stdout)
-		return exitOK
+		return exitcode.OK
 	}
 	// --version отвечает раньше всех прочих проверок и ничего не читает
 	// с диска. Так флаг работает и на системе, где конфига ещё нет, и на
@@ -87,12 +93,22 @@ func run() int {
 	// скрипт, определяя установленную версию перед обновлением.
 	if showVersion {
 		fmt.Println(version.String())
-		return exitOK
+		return exitcode.OK
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n\n", fs.Arg(0))
 		usage(os.Stderr)
-		return exitError
+		return exitcode.Error
+	}
+
+	// Режимы работы взаимоисключающи, и это проверяется явно, а не решается
+	// молчаливым приоритетом. "--setup -d" — не "настроить, а потом стать
+	// демоном", а опечатка, и выполнить половину написанного хуже, чем
+	// отказаться и сказать, что именно не сочетается.
+	if modes := requestedModes(daemonMode, showInfo, checkConfig, setupMode, printUnit); len(modes) > 1 {
+		fmt.Fprintf(os.Stderr, "these flags cannot be combined: %s\n\n", strings.Join(modes, ", "))
+		usage(os.Stderr)
+		return exitcode.Error
 	}
 
 	// Пустой путь означает, что и умолчание не вычислилось, и --config не задан.
@@ -102,15 +118,44 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "cannot determine the default configuration path: "+
 			"the home directory of the current user is unknown.\n"+
 			"Pass the path explicitly: nfo_updater --config /path/to/config.conf\n")
-		return exitConfig
+		return exitcode.Config
 	}
 
-	// -v обрабатывается ДО EnsureConfig, и это принципиально: справочные
-	// флаги ничего не меняют на диске. Иначе запрос версии на свежей системе
-	// заводил бы конфиг и отвечал сообщением о его создании вместо
-	// запрошенной информации.
+	// Обе установочные команды отказываются работать из-под sudo. Под ним
+	// $HOME становится /root: мастер записал бы ключи API в /root/.config,
+	// где обычный пользователь их не найдёт и прав на них не имеет,
+	// а --print-unit выдал бы юнит с User=root. Поведение sudo с HOME
+	// разнится между дистрибутивами, так что угадывать нельзя.
+	//
+	// Настоящий вход под root (SUDO_USER пуст) — не этот случай: на NAS
+	// с единственной учётной записью это нормальный режим, и запрещать его
+	// нельзя. Условие в точности повторяет проверку установочного скрипта;
+	// здесь она нужна потому, что команду могут набрать и руками.
+	if setupMode || printUnit != "" {
+		if os.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
+			fmt.Fprintf(os.Stderr,
+				"refusing to run under sudo.\n"+
+					"The configuration belongs to your own user; under sudo it would be written to\n"+
+					"root's home directory instead, where you would neither find it nor be able to\n"+
+					"read it. Run this command as yourself — the installer asks for the password\n"+
+					"only for the few steps that need it.\n")
+			return exitcode.Error
+		}
+	}
+
+	// Справочные и служебные режимы обрабатываются ДО EnsureConfig, и это
+	// принципиально: ни один из них не должен ничего менять на диске.
+	// Иначе запрос версии на свежей системе заводил бы конфиг и отвечал
+	// сообщением о его создании вместо запрошенной информации, а мастер
+	// настройки стартовал бы поверх только что созданного им же шаблона.
 	if showInfo {
 		return doShowInfo(configPath)
+	}
+	if printUnit != "" {
+		return doPrintUnit(configPath, printUnit)
+	}
+	if setupMode {
+		return doSetup(context.Background(), configPath)
 	}
 
 	// EnsureConfig создаёт конфиг из шаблона при первом запуске и переносит
@@ -119,28 +164,32 @@ func run() int {
 	// его заполнить.
 	if _, err := config.EnsureConfig(configPath); err != nil {
 		if errors.Is(err, config.ErrConfigCreated) {
-			// Справка о ключах печатается сразу: в этот момент человек как раз
-			// собирается открыть только что созданный файл, и отправлять его
-			// искать три сайта самостоятельно незачем.
+			// Предлагаются обе дороги, и мастер первой. Справка о ключах
+			// печатается сразу: человек, выбравший вторую, в этот момент
+			// как раз собирается открыть только что созданный файл,
+			// и отправлять его искать три сайта самостоятельно незачем.
 			fmt.Printf("A default configuration file has been created at:\n  %s\n\n"+
-				"Fill in the API keys and the media library paths, then start nfo_updater again.\n\n"+
+				"Run the setup wizard to fill it in:\n\n"+
+				"  nfo_updater --setup\n\n"+
+				"Or edit the file by hand: the API keys and the media library paths are\n"+
+				"the parts that have to be filled in before the first pass.\n\n"+
 				"Where to get the keys:\n%s\n", configPath, providers.FormatKeyHelp("  "))
-			return exitConfig
+			return exitcode.Config
 		}
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
-		return exitConfig
+		return exitcode.Config
 	}
 
 	cfg, cfgErr := config.Load(configPath)
 	if cfgErr != nil {
 		reportConfigError(configPath, cfgErr)
-		return exitConfig
+		return exitcode.Config
 	}
 
 	database, err := db.Open(cfg.DatabasePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "database: %v\n", err)
-		return exitError
+		return exitcode.Error
 	}
 	defer database.Close()
 
@@ -160,6 +209,95 @@ func run() int {
 	return doOneShot(ctx, runner)
 }
 
+// requestedModes — список заданных взаимоисключающих флагов, в том виде,
+// в каком они написаны в командной строке. Нужен только для сообщения
+// об ошибке: перечислить, что именно не сочетается, полезнее, чем сказать
+// "флаги несовместимы" и заставить перечитывать справку.
+//
+// -h и -V сюда не входят: они обработаны выше и до этой точки не доходят.
+func requestedModes(daemonMode, showInfo, checkConfig, setupMode bool, printUnit string) []string {
+	var modes []string
+	if daemonMode {
+		modes = append(modes, "-d")
+	}
+	if showInfo {
+		modes = append(modes, "-v")
+	}
+	if checkConfig {
+		modes = append(modes, "--check-config")
+	}
+	if setupMode {
+		modes = append(modes, "--setup")
+	}
+	if printUnit != "" {
+		modes = append(modes, "--print-unit")
+	}
+	return modes
+}
+
+// doSetup — режим --setup: интерактивный мастер настройки.
+//
+// Собственного вывода здесь нет: мастер и спрашивает, и печатает в /dev/tty,
+// потому что установочный скрипт приходит по каналу и stdin бинарника — это
+// тело скрипта. Наружу отсюда уходит только код возврата.
+func doSetup(ctx context.Context, configPath string) int {
+	res, err := setup.Run(ctx, configPath)
+	if err != nil {
+		if errors.Is(err, setup.ErrAborted) {
+			// Осознанный отказ, а не поломка: на диске ничего не изменено,
+			// и рапортовать о неудаче тут не о чем.
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return exitcode.Aborted
+		}
+		fmt.Fprintf(os.Stderr, "setup: %v\n", err)
+		return exitcode.Error
+	}
+
+	// Единственное, что мастер сообщает наружу помимо факта успеха: нужна
+	// ли служба. Через код возврата, а не через stdout, потому что stdout
+	// у мастера уже занят под юнит в соседнем режиме, и один машинный
+	// канал на две разные вещи — приглашение к путанице.
+	if res.Scheduled {
+		return exitcode.ServiceWanted
+	}
+	return exitcode.OK
+}
+
+// doPrintUnit — режим --print-unit: текст systemd-юнита в stdout и больше
+// ничего. Ни заголовка, ни пояснений: stdout здесь машинный канал,
+// установочный скрипт перенаправляет его прямо в файл.
+//
+// Конфиг читается с диска через Load, а не через EnsureConfig: запросный
+// режим не должен ни создавать шаблон, ни мигрировать файл, ни писать .bak.
+// Читать конфиг самостоятельно, а не получать пути от мастера в памяти, —
+// требование команды `service on`: она добавляет службу к уже установленной
+// программе, и мастер при этом не запускается.
+//
+// Валидация выполняется полная. Сгенерировать юнит по сломанному конфигу
+// значит отложить ошибку до systemctl start, где она будет выглядеть
+// как status=1/FAILURE без единого намёка на причину.
+func doPrintUnit(configPath, binaryPath string) int {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "no configuration file at %s\n"+
+				"Run nfo_updater --setup first: the unit file needs the media library paths.\n",
+				configPath)
+			return exitcode.Config
+		}
+		reportConfigError(configPath, err)
+		return exitcode.Config
+	}
+
+	text, err := unit.Generate(cfg, configPath, binaryPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot generate the unit file: %v\n", err)
+		return exitcode.Error
+	}
+	fmt.Print(text)
+	return exitcode.OK
+}
+
 // doShowInfo — режим -v: версия и пути, с которыми программа работает.
 // Ничего не проверяет и ничего не создаёт.
 //
@@ -172,7 +310,7 @@ func doShowInfo(configPath string) int {
 	if cfg != nil {
 		// Конфиг прочитан. Прошёл он валидацию или нет — нам здесь неважно.
 		fmt.Println(cfg.Describe(configPath))
-		return exitOK
+		return exitcode.OK
 	}
 
 	if errors.Is(err, os.ErrNotExist) {
@@ -181,13 +319,13 @@ func doShowInfo(configPath string) int {
 		// что появятся в конфиге при первом настоящем запуске.
 		fmt.Println(config.Defaults().Describe(configPath))
 		fmt.Printf("\nno configuration file yet, the paths above are the defaults\n")
-		return exitOK
+		return exitcode.OK
 	}
 
 	// Файл есть, но не читается: нет прав, битая ссылка и тому подобное.
 	fmt.Printf("NFO Updater\nVersion %s • %s\n", version.Version, version.BuildDate)
 	fmt.Fprintf(os.Stderr, "\ncannot read the configuration file: %v\n", err)
-	return exitConfig
+	return exitcode.Config
 }
 
 // reportConfigError печатает ошибку конфига и, если дело в незаполненных
@@ -219,25 +357,25 @@ func doCheckConfig(ctx context.Context, cfg *config.Config, configPath string, r
 
 	if err := runner.CheckKeys(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "key check failed: %v\n", err)
-		return exitError
+		return exitcode.Error
 	}
 
 	fmt.Println("\nChecking media servers...")
 	runner.CheckMediaServers(ctx)
 
 	fmt.Println("Done.")
-	return exitOK
+	return exitcode.OK
 }
 
 // doOneShot — обычный запуск без флагов: один прогон и выход.
 func doOneShot(ctx context.Context, runner *processor.Runner) int {
 	if err := runner.Run(ctx); err != nil {
 		if errors.Is(err, lock.ErrBusy) {
-			return exitBusy
+			return exitcode.Busy
 		}
-		return exitError
+		return exitcode.Error
 	}
-	return exitOK
+	return exitcode.OK
 }
 
 // doDaemon — режим -d: демон живёт постоянно, запускает прогоны по
@@ -316,10 +454,10 @@ func doDaemon(ctx context.Context, cfg *config.Config, configPath string, databa
 
 	if err != nil {
 		bootLogger.Event("[ERROR] %v", err)
-		return exitError
+		return exitcode.Error
 	}
 	bootLogger.Event("[DAEMON_STOP] stopped")
-	return exitOK
+	return exitcode.OK
 }
 
 // scheduleLoop спит до ближайшего срока по расписанию и запускает прогон.
@@ -415,7 +553,13 @@ Running with no flags performs a single pass over the library and exits.
 
 Flags:
 
-  -d              Run as a daemon: stay resident and start a pass on the
+  --setup         Set everything up in a question-and-answer session: where
+                  the media library lives, which API keys to use, whether to
+                  work on a schedule. Nothing is written until the last
+                  question has been answered, so leaving halfway changes
+                  nothing. Safe to run again later to change any of it.
+
+  -d              Run as a DAEMON: stay resident and start a pass on the
                   schedule set by SCHEDULE in the config file.
 
   -v              Show version and the paths this instance would use
@@ -425,15 +569,11 @@ Flags:
   --config PATH   Path to the configuration file.
                   Default: %s
 
-  -V, --version   Print the version and the build date on a single line,
-                  then exit. Reads nothing and creates nothing, so it also
-                  answers before a configuration file exists.
-
   -h, --help      Show this help.
 
 API keys:
 
-  All three services must be configured. Every key is verified at the start
+  All services must be configured. Every key is verified at the start
   of each pass, so a key that has expired or been revoked is reported in the
   log right away, along with the address it can be replaced from:
 
@@ -456,12 +596,15 @@ Media servers:
 
 Exit codes:
 
-  %d  success
-  %d  error during the pass
-  %d  configuration problem
-  %d  another instance is already running
+  %2d  success, and for --setup also: no scheduled operation was wanted
+  %2d  error during the pass
+  %2d  configuration problem
+  %2d  another instance is already running
+  %2d  setup was cancelled, nothing has been changed
+  %2d  setup finished and scheduled operation was wanted
 `, version.Version, version.BuildDate, configPathForHelp(),
 		providers.FormatKeyHelp("  "),
-		exitOK, exitError, exitConfig, exitBusy)
+		exitcode.OK, exitcode.Error, exitcode.Config, exitcode.Busy,
+		exitcode.Aborted, exitcode.ServiceWanted)
 	fmt.Fprintln(w)
 }

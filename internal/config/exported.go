@@ -14,6 +14,7 @@ package config
 // туда-сюда при каждой новой надобности.
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 )
@@ -36,6 +37,33 @@ func ExistingValues(path string) (map[string]string, error) {
 		return nil, err
 	}
 	return userValues(string(raw)), nil
+}
+
+// Configured отвечает, настраивал ли кто-нибудь эту систему, — в отличие
+// от ExistingValues, которая отвечает, что именно там написано.
+//
+// Вопросы разные, и путать их дорого. Мастер настройки судил о том, есть
+// ли прежняя настройка, по непустоте карты значений — но свежесозданный
+// шаблон содержит дюжину непустых умолчаний (LOG_ENABLED, IMDB_RATING,
+// DEFAULT_RATING, CREW_ORDER_FIX, пороги circuit breaker), и человек,
+// один раз запустивший программу голым и получивший шаблон, слышал бы
+// от мастера "найдена существующая конфигурация". Хуже того, умолчание
+// вопроса о расписании считается из SCHEDULE, а в шаблоне он пуст, —
+// то есть на первой же установке Enter отказывался бы от фоновой работы
+// вместо согласия на неё.
+//
+// Сравнение идёт с самим шаблоном, а не с перечнем "важных" ключей:
+// список важного пришлось бы держать в согласии с мастером, а шаблон
+// и так лежит рядом.
+func Configured(path string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !maps.Equal(userValues(string(raw)), userValues(defaultConfigTemplate)), nil
 }
 
 // Имена внутри каталога данных. Собраны здесь, потому что нужны в двух

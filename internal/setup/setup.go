@@ -56,7 +56,15 @@ func Run(ctx context.Context, configPath string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read the existing configuration: %w", err)
 	}
-	reconfigure := len(values) > 0
+
+	// "Уже настроено" и "файл существует" — разные вещи: непустой шаблон,
+	// созданный обычным запуском, не является чужой настройкой. Подробности
+	// в config.Configured; здесь важно, что от этого флага зависит и текст
+	// приветствия, и умолчание вопроса о расписании.
+	reconfigure, err := config.Configured(configPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("read the existing configuration: %w", err)
+	}
 
 	p.Blank()
 	p.Text("NFO Updater %s — setup", version.Version)
