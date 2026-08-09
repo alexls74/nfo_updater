@@ -49,6 +49,7 @@ const (
 	fetchIDUnknown                       // провайдеры ответили: тайтла с таким ID у них нет
 	fetchNoRatings                       // тайтл есть, но рейтингов у него нет
 	fetchNoProvider                      // ни один настроенный провайдер не умеет искать по этим ID
+	fetchNoEpisodeID                     // у серии нет своего ID, а в данных сериала её нет
 )
 
 // describe возвращает текст для лога и признак, надо ли записывать тайтл
@@ -65,6 +66,14 @@ func (o fetchOutcome) describe() (reason string, persist bool) {
 		return "the title is known to the providers but has no ratings yet — nothing to fix, this is normal for new releases and short films", true
 	case fetchNoProvider:
 		return "none of the configured providers can look up this combination of ids", true
+	case fetchNoEpisodeID:
+		// Отдельный исход, а не fetchNoProvider, потому что провайдеры тут
+		// ни при чём: спрашивать было нечего и некого. Прежняя формулировка
+		// отправляла человека проверять настройку сервисов вместо файла,
+		// в котором нет ни <uniqueid>, ни заполненного <imdbid>.
+		return "the file has no episode id of its own, and the series data has no rating " +
+			"for this episode — add <uniqueid type=\"imdb\"> to the file; specials " +
+			"(season 0) are often missing from the series data", false
 	default:
 		return "providers could not be reached during this run — nothing to fix in the file, it will be retried next run", false
 	}

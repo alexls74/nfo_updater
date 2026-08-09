@@ -262,8 +262,9 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 
 	// Исход по умолчанию — на случай, когда серии нет ни в таблице от
 	// MDBList, ни собственного imdb id у неё нет: спрашивать оказалось
-	// некого, и это не сбой провайдеров.
-	outcome := fetchNoProvider
+	// нечего и некого. Это не про настройку провайдеров, а про содержимое
+	// файла, и называться должно соответственно.
+	outcome := fetchNoEpisodeID
 
 	key := fmt.Sprintf("%d:%d", season, episode)
 	if r, ok := episodeRatings[key]; ok {
@@ -290,11 +291,20 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 
 	if !found {
 		reason, persist := outcome.describe()
-		deps.Stats.IncPending()
-		if persist && episodeIMDbID != "" {
-			_ = deps.DB.MarkPending(episodeIMDbID, "", "", reason)
+		if outcome == fetchNoEpisodeID {
+			// Считается как «нет ID», а не как «ждём»: ждать тут нечего,
+			// чинится это правкой файла. Раньше такая серия попадала
+			// в строку сводки "pending", а "no id" оставалась нулём —
+			// то есть сводка указывала не туда же, куда и лог.
+			deps.Stats.IncNoID()
+			deps.Logger.Event("[NO_ID] %s: %s", path, reason)
+		} else {
+			deps.Stats.IncPending()
+			if persist && episodeIMDbID != "" {
+				_ = deps.DB.MarkPending(episodeIMDbID, "", "", reason)
+			}
+			deps.Logger.Event("[PENDING] %s: %s", path, reason)
 		}
-		deps.Logger.Event("[PENDING] %s: %s", path, reason)
 		var c bool
 		newContent, c = nfo.EnsureEmptyUserRating(newContent)
 		changed = changed || c

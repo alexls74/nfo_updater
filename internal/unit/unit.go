@@ -108,6 +108,13 @@ func Generate(cfg *config.Config, configPath, binaryPath string) (string, error)
 	// /etc/passwd, и совпадение он обычно даёт, но зависимость получается
 	// невидимой. Юнит должен читаться как самодостаточный документ.
 	fmt.Fprintf(&b, "ExecStart=%s -d --config %s\n", bin, conf)
+	// Перечитывание конфига по `systemctl reload nfo_updater`. Без этой
+	// строки systemd отвечает "Job type reload is not applicable", и
+	// единственным способом подхватить правки остаётся перезапуск службы —
+	// а он обрывает прогон, если тот идёт прямо сейчас. Демон по SIGHUP
+	// откладывает перезагрузку до конца прогона и при ошибке в новом
+	// конфиге продолжает работать со старым.
+	b.WriteString("ExecReload=/bin/kill -HUP $MAINPID\n")
 	b.WriteString("Restart=on-failure\n")
 	b.WriteString("RestartSec=30\n")
 	// Сломанный конфиг перезапуском не чинится: программа будет падать
