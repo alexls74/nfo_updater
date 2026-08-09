@@ -244,14 +244,18 @@ func doSetup(ctx context.Context, configPath string) int {
 	res, err := setup.Run(ctx, configPath)
 	if err != nil {
 		if errors.Is(err, setup.ErrAborted) {
-			// Осознанный отказ, а не поломка: на диске ничего не изменено,
-			// и рапортовать о неудаче тут не о чем.
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+			// Осознанный отказ, а не поломка: на диске ничего не изменено.
+			// Молчим намеренно — о прерывании человеку уже сказал сам
+			// мастер, на том же терминале, где шёл разговор. Второе
+			// сообщение здесь было бы повтором, а третье добавил бы
+			// установочный скрипт.
 			return exitcode.Aborted
 		}
 		fmt.Fprintf(os.Stderr, "setup: %v\n", err)
 		return exitcode.Error
 	}
+
+	recordKeyUsage(configPath, res.KeyUsage)
 
 	// Единственное, что мастер сообщает наружу помимо факта успеха: нужна
 	// ли служба. Через код возврата, а не через stdout, потому что stdout
@@ -261,6 +265,48 @@ func doSetup(ctx context.Context, configPath string) int {
 		return exitcode.ServiceWanted
 	}
 	return exitcode.OK
+}
+
+// recordKeyUsage списывает в базу запросы, потраченные мастером на проверку
+// ключей.
+//
+// Делается ЗДЕСЬ, а не внутри мастера, по одной причине: база лежит по пути,
+// который мастер как раз и настраивает, и открыть её раньше записи конфига
+// значило бы завести файл на диске в середине диалога. Мастер до последнего
+// вопроса не меняет на диске ничего, и ломать это ради счётчика нельзя.
+//
+// Неудача не влияет на код возврата. К этому моменту конфиг записан и
+// установка состоялась; развалить её из-за несписанного счётчика было бы
+// несоразмерно, а незамеченным это не останется — прогон просто посчитает
+// на несколько запросов больше доступных.
+func recordKeyUsage(configPath string, usage map[string][]int) {
+	if len(usage) == 0 {
+		return
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "note: could not record the requests spent on key checks: %v\n", err)
+		return
+	}
+	database, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "note: could not record the requests spent on key checks: %v\n", err)
+		return
+	}
+	defer database.Close()
+
+	for provider, counts := range usage {
+		for index, requests := range counts {
+			for i := 0; i < requests; i++ {
+				if _, err := database.IncrementUsage(provider, index); err != nil {
+					fmt.Fprintf(os.Stderr,
+						"note: could not record the requests spent on key checks: %v\n", err)
+					return
+				}
+			}
+		}
+	}
 }
 
 // doPrintUnit — режим --print-unit: текст systemd-юнита в stdout и больше

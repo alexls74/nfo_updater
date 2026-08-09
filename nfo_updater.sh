@@ -385,7 +385,10 @@ cmd_install() { # user_mode
 	0) _want_service='no' ;;
 	"$EXIT_SETUP_SERVICE") _want_service='yes' ;;
 	"$EXIT_SETUP_ABORTED")
-		say "Setup cancelled. Nothing has been installed."
+		# О прерывании человеку уже сказал сам мастер, на том же экране,
+		# где шёл разговор. Повторять незачем — добавляем только то, чего
+		# мастер знать не может: что установка тоже не состоялась.
+		say "Nothing has been installed."
 		exit 0
 		;;
 	*) die "setup did not finish (exit code $_rc). Nothing has been installed." ;;
@@ -528,7 +531,6 @@ cmd_configure() {
 	0) _want_service='no' ;;
 	"$EXIT_SETUP_SERVICE") _want_service='yes' ;;
 	"$EXIT_SETUP_ABORTED")
-		say "Cancelled. Nothing has been changed."
 		exit 0
 		;;
 	*) die "setup did not finish (exit code $_rc)" ;;

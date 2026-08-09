@@ -16,6 +16,7 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -38,6 +39,21 @@ type Result struct {
 	// потому что расписание — про то, КОГДА работать, а не про то, КАК
 	// программа оказывается запущена.
 	Scheduled bool
+
+	// KeyUsage — сколько запросов суточной квоты израсходовала проверка
+	// ключей: имя сервиса, дальше по номеру ключа в итоговом списке.
+	//
+	// Наружу это уходит потому, что записать расход в базу мастер не может
+	// сам. База лежит по пути, который настраивается прямо сейчас, и открыть
+	// её раньше записи конфига значило бы завести файл на диске в середине
+	// диалога — а мастер до последнего вопроса не меняет на диске ничего.
+	// Учесть расход обязательно: иначе счётчик демона с первого же дня
+	// врёт на число проверок.
+	//
+	// Непустым бывает только у OMDb: отдельного способа проверить ключ
+	// у сервиса нет, и проверка стоит настоящего запроса. У MDBList и TMDb
+	// она бесплатна.
+	KeyUsage map[string][]int
 }
 
 // Run проводит человека по всем секциям и записывает конфиг.
@@ -52,6 +68,19 @@ func Run(ctx context.Context, configPath string) (Result, error) {
 	}
 	defer p.Close()
 
+	res, err := runSections(ctx, p, configPath)
+	if errors.Is(err, ErrAborted) {
+		// Прощание печатает мастер, и только он. Раньше о прерывании
+		// сообщали трое подряд — сам мастер молчал, зато main.go печатал
+		// текст ошибки, а установочный скрипт добавлял своё, — и человек
+		// получал две строки об одном и том же.
+		p.Blank()
+		p.Text("Setup cancelled. Nothing has been changed.")
+	}
+	return res, err
+}
+
+func runSections(ctx context.Context, p *Prompt, configPath string) (Result, error) {
 	values, err := config.ExistingValues(configPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("read the existing configuration: %w", err)
@@ -88,7 +117,8 @@ func Run(ctx context.Context, configPath string) (Result, error) {
 	if err := askLibrary(p, values); err != nil {
 		return Result{}, err
 	}
-	if err := askKeys(ctx, p, values); err != nil {
+	keyUsage, err := askKeys(ctx, p, values)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := askServers(ctx, p, values); err != nil {
@@ -98,7 +128,7 @@ func Run(ctx context.Context, configPath string) (Result, error) {
 	if err := confirmAndWrite(p, configPath, values); err != nil {
 		return Result{}, err
 	}
-	return Result{ConfigPath: configPath, Scheduled: scheduled}, nil
+	return Result{ConfigPath: configPath, Scheduled: scheduled, KeyUsage: keyUsage}, nil
 }
 
 // askSchedule — как программа запускается.
@@ -276,8 +306,14 @@ func confirmAndWrite(p *Prompt, configPath string, values map[string]string) err
 func printSummary(p *Prompt, configPath string, values map[string]string) {
 	current := currentDataPaths(values, config.DefaultDataDir())
 
+	// Путь к ФАЙЛУ базы, а не к каталогу: ровно то, что покажет -v и что
+	// увидит человек в логе. Каталогами оперирует секция DATA LOCATION,
+	// потому что спрашивает она именно о них, — но сводка обязана совпадать
+	// с тем, как программа отчитывается о себе потом.
+	databasePath, _, _ := config.DataPathsUnder(current.databaseDir)
+
 	p.Text("config     %s", configPath)
-	p.Text("database   %s", current.databaseDir)
+	p.Text("database   %s", databasePath)
 	p.Text("logs       %s", current.logs)
 	if isNo(values["BACKUP_ENABLED"]) {
 		p.Text("backups    disabled")

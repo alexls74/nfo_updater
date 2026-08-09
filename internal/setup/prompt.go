@@ -66,12 +66,23 @@ func (p *Prompt) Text(format string, a ...any) {
 	fmt.Fprintf(p.tty, format+"\n", a...)
 }
 
-// Note — подсказка приглушённым цветом. Многострочный текст приглушается
-// построчно: одна последовательность на весь абзац сбилась бы на первом же
-// переносе, сделанном терминалом.
+// Note — пояснение к вопросу.
+//
+// Печатается обычной яркостью, БЕЗ приглушения. Приглушение (SGR 2) многие
+// терминалы рисуют серым по серому, а на светлой теме оно и вовсе почти
+// не читается — а здесь этим цветом набрана добрая половина того, что
+// человеку нужно прочесть, чтобы ответить. Пояснение отличается от вопроса
+// не яркостью, а начертанием: вопрос жирный, пояснение обычное. Такой
+// контраст поддерживают все терминалы и переживает копирование в переписку.
+//
+// Приглушённым остаётся только то, что действительно второстепенно:
+// умолчания в скобках и линии рамок.
+//
+// Многострочный текст печатается построчно: так он ведёт себя одинаково
+// вне зависимости от того, красим мы его или нет.
 func (p *Prompt) Note(format string, a ...any) {
 	for _, line := range strings.Split(fmt.Sprintf(format, a...), "\n") {
-		fmt.Fprintln(p.tty, p.Style.Dim(line))
+		fmt.Fprintln(p.tty, line)
 	}
 }
 
@@ -150,6 +161,16 @@ func (p *Prompt) Line(question, def string) (string, error) {
 	return ans, nil
 }
 
+// LineWithHint — свободный ответ без умолчания, но с подсказкой в скобках.
+//
+// Отличается от Line тем, что подсказка не является значением: пустой ввод
+// так и возвращается пустым. Нужно там, где пустая строка сама по себе
+// осмысленный ответ, — например «больше ключей нет».
+func (p *Prompt) LineWithHint(question, hint string) (string, error) {
+	p.ask(question, hint)
+	return p.readLine()
+}
+
 // Required — как Line, но пустой ответ не принимается, пока нет умолчания.
 func (p *Prompt) Required(question, def string) (string, error) {
 	for {
@@ -206,12 +227,18 @@ func (p *Prompt) Choice(question string, options []Option, def int) (int, error)
 		keys = append(keys, o.Key)
 	}
 	hint := strings.Join(keys, "/")
-	if def >= 0 && def < len(options) {
-		hint = options[def].Key
-	}
+	hasDefault := def >= 0 && def < len(options)
 
 	for {
-		fmt.Fprintln(p.tty, p.Style.Bold(question))
+		// Умолчание показывается в тексте вопроса — как во всех остальных
+		// вопросах мастера. Раньше оно вычислялось и не печаталось нигде:
+		// Enter молча выбирал первый вариант, и промах по клавише обходился
+		// в полный перенабор ключей.
+		line := p.Style.Bold(question)
+		if hasDefault {
+			line += " " + p.Style.Dim("["+options[def].Key+"]")
+		}
+		fmt.Fprintln(p.tty, line)
 		for _, o := range options {
 			p.Note("  %s  %s", o.Key, o.Label)
 		}
@@ -222,7 +249,7 @@ func (p *Prompt) Choice(question string, options []Option, def int) (int, error)
 			return 0, err
 		}
 		if ans == "" {
-			if def >= 0 && def < len(options) {
+			if hasDefault {
 				return def, nil
 			}
 			p.Problem("please pick one of: %s", hint)

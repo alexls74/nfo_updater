@@ -208,11 +208,16 @@ func askMediaPaths(p *Prompt, question string, current []string, accept func(pat
 	var out []string
 	for {
 		prompt := question
+		hint := ""
 		if len(out) > 0 {
-			prompt = "Another directory (leave empty when done)"
+			// С глаголом: голое "Another directory" читается ещё и как
+			// "а теперь другой каталог, вместо этого". Подсказка вынесена
+			// в скобки, как во всех остальных вопросах мастера.
+			prompt = "Add another directory"
+			hint = "leave empty when done"
 		}
 
-		raw, err := p.Line(prompt, "")
+		raw, err := p.LineWithHint(prompt, hint)
 		if err != nil {
 			return nil, err
 		}
