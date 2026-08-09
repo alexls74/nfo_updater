@@ -27,7 +27,7 @@ const keyCheckTimeout = 30 * time.Second
 // мастер, ничего не записав.
 func askKeys(ctx context.Context, p *Prompt, values map[string]string) error {
 	p.Section("RATING SERVICES")
-	p.Note("All three services are required. Each has a free tier that is more")
+	p.Note("All services are required. Each has a free tier that is more")
 	p.Note("than enough for a home library.")
 
 	omdb, err := askKeyList(p, "omdb", splitCSV(values["OMDB_API_KEYS"]))
