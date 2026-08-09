@@ -112,6 +112,12 @@ func askKeys(ctx context.Context, p *Prompt, values map[string]string) (map[stri
 // проверка идёт через /user, у TMDb через /authentication, и обе бесплатны.
 // Молчать об этом нельзя — тысяча запросов в сутки не бесконечна, и человек
 // вправе знать, что несколько из них ушли на настройку.
+//
+// Считать израсходованное в сумме по всем ключам НЕЛЬЗЯ, и первая версия
+// этого текста именно этим и грешила: "2 of the 1000 daily requests have
+// been used" при двух ключах читается так, будто общий запас на всех —
+// тысяча. Между тем квота у OMDb привязана к ключу, у каждого своя тысяча,
+// и потрачено было по одному запросу с каждого.
 func (u keyUsage) report(p *Prompt) {
 	spent := u.total("omdb")
 	if spent == 0 {
@@ -121,17 +127,29 @@ func (u keyUsage) report(p *Prompt) {
 	if !ok {
 		return
 	}
+
 	p.Blank()
-	p.Note("Checking OMDb keys costs real requests: the service has no free way")
-	p.Note("to verify one. %s of the %d daily requests %s been used, and %s be",
-		plural("One", fmt.Sprintf("%d", spent), spent),
-		help.DailyLimit,
-		plural("has", "have", spent),
-		plural("it will", "they will", spent))
+	p.Note("Checking an OMDb key costs one real request: the service has no free")
+	p.Note("way to verify one. Every key has its own allowance of %d per day.",
+		help.DailyLimit)
 	// Будущее время здесь точное, а не осторожное: расход списывается
 	// в базу уже после записи конфига, и человек, отказавшийся на сводке,
 	// не получит в базе ничего.
-	p.Note("counted in the database once the configuration is written.")
+	keys := len(u["omdb"])
+	switch {
+	case keys == 1 && spent == 1:
+		p.Note("One request has been used, and will be counted in the database")
+		p.Note("once the configuration is written.")
+	case keys == spent:
+		p.Note("One request from each of the %d keys has been used, and they will be", keys)
+		p.Note("counted in the database once the configuration is written.")
+	default:
+		// Ключ мог проверяться дважды: сначала как унаследованный из
+		// конфига, потом введённый заново.
+		p.Note("%d requests across %d %s have been used, and they will be counted",
+			spent, keys, plural("key", "keys", keys))
+		p.Note("in the database once the configuration is written.")
+	}
 }
 
 // askKeysFor собирает ключи одного сервиса.
@@ -239,11 +257,11 @@ func askKeysFor(ctx context.Context, p *Prompt, help providers.KeyHelp,
 				p.Problem("that key has already been entered")
 				continue
 			}
-			ok, err := checkAndReport(ctx, p, help, candidate, usage)
+			keep, err := checkAndReport(ctx, p, help, candidate, usage)
 			if err != nil {
 				return nil, err
 			}
-			if ok {
+			if keep {
 				accepted = append(accepted, candidate)
 			}
 			if len(accepted) > 0 && !help.Multi {
@@ -253,12 +271,15 @@ func askKeysFor(ctx context.Context, p *Prompt, help providers.KeyHelp,
 	}
 }
 
-// checkAndReport проверяет ключ по сети и печатает результат.
+// checkAndReport проверяет ключ по сети, печатает результат и, если проверить
+// не удалось, спрашивает, менять ли ключ.
 //
-// Возвращает true, если ключ следует принять. Недоступный сервис — тоже
-// повод принять: о самом ключе это не говорит ничего, а заставлять человека
-// перенабирать заведомо правильный ключ из-за упавшей сети бессмысленно.
-// Прогон всё равно проверяет ключи на старте и скажет о негодном в логе.
+// Возвращает true, если ключ следует принять. Недоступный сервис сам по себе
+// не повод браковать ключ: о ключе это не говорит ничего. Но и проходить
+// молча такая проверка не должна — человек, ошибившийся в ключе, иначе узнает
+// об этом только на первом прогоне. Поэтому вопрос с умолчанием «оставить»:
+// один Enter для того, у кого просто нет сети, и возможность исправить для
+// того, кто подозревает опечатку.
 func checkAndReport(ctx context.Context, p *Prompt, help providers.KeyHelp,
 	key string, usage keyUsage) (bool, error) {
 
@@ -282,9 +303,13 @@ func checkAndReport(ctx context.Context, p *Prompt, help providers.KeyHelp,
 		return false, nil
 	default:
 		p.Result(false, "%s could not be checked: %s", label, res.Reason)
-		p.Note("Keeping it anyway: that says nothing about the key, only about")
-		p.Note("the service. It will be checked again on the first pass.")
-		return true, nil
+		p.Note("That says nothing about the key, only about the service. Keeping it")
+		p.Note("means it will be checked again on the first pass.")
+		again, err := p.YesNo("Enter a different "+help.Display+" key?", false)
+		if err != nil {
+			return false, err
+		}
+		return !again, nil
 	}
 }
 

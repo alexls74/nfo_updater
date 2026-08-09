@@ -120,84 +120,150 @@ func askServers(ctx context.Context, p *Prompt, values map[string]string) error 
 	return nil
 }
 
-// askOneServer спрашивает адрес, секрет и (для Plex) секции, после чего
-// проверяет связь.
+// askOneServer спрашивает адрес, секрет и (для Plex) секции.
 //
-// Неудачная проверка НЕ отменяет настройку: сервер может быть выключен
-// на ночь, а прогон недоступный сервер всё равно не роняет. Поэтому
-// развилка из трёх ответов, а не отказ.
+// Схема ровно та же, что у ключей API, и это не совпадение, а требование:
+// человек проходит обе секции подряд, и правила поведения в них не должны
+// расходиться.
+//
+//	введено значение -> оно проверяется -> сервис сказал «нет»: спрашиваем
+//	снова, здесь же, пока человек ещё смотрит на то место, откуда значение
+//	брал. Сервис не ответил — принимаем как есть и говорим почему.
+//
+// Меню из трёх ответов, которое стояло здесь раньше, убрано. Оно спрашивало
+// про отказ ровно то же, что спрашивает пустой ввод, а про недоступность —
+// то, что и так решается само: недоступный сервер не повод бросать настройку,
+// прогон его всё равно не роняет.
+//
+// Разделить «не тот адрес» и «не тот ключ» позволяет mediaserver.Reach: он
+// трогает эндпоинт, отвечающий без авторизации, и потому говорит про адрес
+// и только про адрес. Раньше неверный адрес выяснялся уже после того, как
+// человек сходил в настройки сервера за ключом, и перенабирать предлагалось
+// и то и другое.
 func askOneServer(ctx context.Context, p *Prompt, values map[string]string,
 	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client) error {
 
-	for {
-		p.Note("The address must be reachable from THIS machine, which is not")
-		p.Note("necessarily the one your browser runs on.")
+	url, err := askServerURL(ctx, p, values, sp, help, client)
+	if err != nil {
+		return err
+	}
+	if url == "" {
+		values[sp.enabledKey] = "no"
+		return nil
+	}
 
-		url, err := p.Required(help.Display+" address, including http:// or https://", values[sp.urlKey])
+	secret, err := askServerSecret(ctx, p, values, sp, help, client, url)
+	if err != nil {
+		return err
+	}
+	if secret == "" {
+		values[sp.enabledKey] = "no"
+		values[sp.urlKey] = url
+		return nil
+	}
+
+	// Секции спрашиваются последними и только у живого сервера: номер
+	// библиотеки бессмысленно уточнять у адреса, который ещё неизвестно чей.
+	if sp.name == "plex" {
+		sections, err := askPlexSections(p, values["PLEX_SECTION_IDS"])
 		if err != nil {
 			return err
+		}
+		values["PLEX_SECTION_IDS"] = strings.Join(sections, ",")
+	}
+
+	values[sp.enabledKey] = "yes"
+	values[sp.urlKey] = url
+	values[sp.secretKey] = secret
+	return nil
+}
+
+// askServerURL спрашивает адрес и сразу проверяет, кто по нему стоит.
+// Пустой ответ означает отказ от этого сервера.
+func askServerURL(ctx context.Context, p *Prompt, values map[string]string,
+	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client) (string, error) {
+
+	p.Note("The address must be reachable from THIS machine, which is not")
+	p.Note("necessarily the one your browser runs on.")
+	p.Note("Leave it empty to skip %s after all.", help.Display)
+
+	question := help.Display + " address, including http:// or https://"
+	for {
+		url, err := p.Line(question, values[sp.urlKey])
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(url) == "" {
+			return "", nil
 		}
 		if err := config.CheckServerURL(sp.urlKey, url); err != nil {
 			p.Problem("%v", err)
 			continue
 		}
 
-		p.Note("Where to get it: %s", help.Where)
-		secret, err := p.Required(help.Display+" "+sp.secretLabel, values[sp.secretKey])
-		if err != nil {
-			return err
-		}
-
-		var sections []string
-		if sp.name == "plex" {
-			sections, err = askPlexSections(p, values["PLEX_SECTION_IDS"])
-			if err != nil {
-				return err
-			}
-		}
-
-		// Проверка связи. Ошибки транспорта здесь уже разобраны на
-		// осмысленные (см. requestError в mediaserver.go): человек получит
-		// не "i/o timeout", а указание, что именно проверять.
-		server := sp.build(url, secret, sections, client)
-		checkErr := server.Ping(ctx)
-
+		checkErr := mediaserver.Reach(ctx, sp.name, url, client)
 		if checkErr == nil {
-			p.Result(true, "%s answered and accepted the %s", help.Display, sp.secretLabel)
-			values[sp.enabledKey] = "yes"
-			values[sp.urlKey] = url
-			values[sp.secretKey] = secret
-			if sp.name == "plex" {
-				values["PLEX_SECTION_IDS"] = strings.Join(sections, ",")
-			}
-			return nil
+			p.Result(true, "%s answered at %s", help.Display, url)
+			return url, nil
 		}
-
 		p.Result(false, "%v", checkErr)
-		choice, err := p.Choice("What would you like to do?", []Option{
-			{Key: "r", Label: "re-enter the address and the " + sp.secretLabel},
-			{Key: "k", Label: "keep these settings anyway (the server may simply be off right now)"},
-			{Key: "d", Label: "do not use " + help.Display},
-		}, 0)
+		if mediaserver.IsUnreachable(checkErr) {
+			p.Note("That says nothing about the address, only about the server.")
+			p.Note("Keeping it means it will be checked again on the first pass.")
+			again, err := p.YesNo("Enter a different address?", false)
+			if err != nil {
+				return "", err
+			}
+			if !again {
+				return url, nil
+			}
+		}
+	}
+}
+
+// askServerSecret спрашивает ключ или токен и проверяет его на уже введённом
+// адресе. Пустой ответ означает отказ от этого сервера.
+func askServerSecret(ctx context.Context, p *Prompt, values map[string]string,
+	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client,
+	url string) (string, error) {
+
+	p.Note("Where to get it: %s", help.Where)
+	p.Note("Leave it empty to skip %s after all.", help.Display)
+
+	question := help.Display + " " + sp.secretLabel
+	for {
+		secret, err := p.Line(question, values[sp.secretKey])
 		if err != nil {
-			return err
+			return "", err
+		}
+		if strings.TrimSpace(secret) == "" {
+			return "", nil
 		}
 
-		switch choice {
-		case 0:
-			continue
-		case 1:
-			values[sp.enabledKey] = "yes"
-			values[sp.urlKey] = url
-			values[sp.secretKey] = secret
-			if sp.name == "plex" {
-				values["PLEX_SECTION_IDS"] = strings.Join(sections, ",")
-			}
-			return nil
-		default:
-			values[sp.enabledKey] = "no"
-			return nil
+		// Секции Ping не нужны: он спрашивает у Plex список секций,
+		// а не содержимое конкретной.
+		checkErr := sp.build(url, secret, nil, client).Ping(ctx)
+		if checkErr == nil {
+			p.Result(true, "%s accepted the %s", help.Display, sp.secretLabel)
+			return secret, nil
 		}
+		p.Result(false, "%v", checkErr)
+		if mediaserver.IsUnreachable(checkErr) {
+			p.Note("That says nothing about the %s, only about the server. Keeping", sp.secretLabel)
+			p.Note("it means it will be checked again on the first pass.")
+			again, err := p.YesNo("Enter a different "+sp.secretLabel+"?", false)
+			if err != nil {
+				return "", err
+			}
+			if !again {
+				return secret, nil
+			}
+			continue
+		}
+		// Адрес свою проверку прошёл, и отказ может быть только про секрет.
+		// Сказать это прямо стоит: иначе человек пойдёт проверять адрес,
+		// с которым всё в порядке.
+		p.Note("The address itself answered, so this is about the %s.", sp.secretLabel)
 	}
 }
 

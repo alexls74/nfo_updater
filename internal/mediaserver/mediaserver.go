@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -112,17 +113,43 @@ func normalizeURL(raw string) string {
 // пользователю проверять. Сырой текст ошибки сохраняется только там, где
 // классифицировать не удалось, — во всех прочих случаях он ничего не
 // добавляет к адресу, который и так стоит в строке.
+// Unreachable — до сервера не дошли или он ответил невнятно. Про сам адрес
+// и про ключ это не говорит ничего: сервер может быть выключен на ночь.
+// Правильная реакция — принять введённое как есть и проверить ещё раз на
+// первом прогоне.
+type Unreachable struct{ msg string }
+
+func (e *Unreachable) Error() string { return e.msg }
+
+// Rejected — сервер ответил и сказал «нет»: не тот адрес, не тот ключ.
+// Введённое заведомо неверно, и чинится это только перенабором.
+type Rejected struct{ msg string }
+
+func (e *Rejected) Error() string { return e.msg }
+
+// IsUnreachable отличает «не дозвонились» от «ответили отказом». Развилка
+// та же, что у ключей API, и по той же причине: в одном случае человека
+// просят исправить введённое, в другом просить нечего.
+func IsUnreachable(err error) bool {
+	var u *Unreachable
+	return errors.As(err, &u)
+}
+
 func requestError(target string, err error) error {
+	return &Unreachable{msg: requestErrorText(target, err)}
+}
+
+func requestErrorText(target string, err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return fmt.Errorf("request to %s was cancelled", target)
+		return fmt.Sprintf("request to %s was cancelled", target)
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%s did not answer in time", target)
+		return fmt.Sprintf("%s did not answer in time", target)
 	}
 
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
-		return fmt.Errorf("cannot reach %s: the host name %q could not be resolved from this machine",
+		return fmt.Sprintf("cannot reach %s: the host name %q could not be resolved from this machine",
 			target, dnsErr.Name)
 	}
 
@@ -130,7 +157,7 @@ func requestError(target string, err error) error {
 	// https:// в адресе сервера, который говорит по обычному http.
 	var recordErr tls.RecordHeaderError
 	if errors.As(err, &recordErr) {
-		return fmt.Errorf("cannot reach %s: the port answered, but not with TLS — the address is most likely http:// rather than https://", target)
+		return fmt.Sprintf("cannot reach %s: the port answered, but not with TLS — the address is most likely http:// rather than https://", target)
 	}
 
 	// Ошибки сертификата разбираются по типам из x509: с версии Go 1.20
@@ -138,15 +165,15 @@ func requestError(target string, err error) error {
 	// доберётся до них через Unwrap в любом случае.
 	var authErr x509.UnknownAuthorityError
 	if errors.As(err, &authErr) {
-		return fmt.Errorf("cannot reach %s: the TLS certificate is not trusted by this machine — a self-signed certificate has to be added to the system trust store", target)
+		return fmt.Sprintf("cannot reach %s: the TLS certificate is not trusted by this machine — a self-signed certificate has to be added to the system trust store", target)
 	}
 	var hostErr x509.HostnameError
 	if errors.As(err, &hostErr) {
-		return fmt.Errorf("cannot reach %s: the TLS certificate is not valid for this host name", target)
+		return fmt.Sprintf("cannot reach %s: the TLS certificate is not valid for this host name", target)
 	}
 	var invalidErr x509.CertificateInvalidError
 	if errors.As(err, &invalidErr) {
-		return fmt.Errorf("cannot reach %s: the TLS certificate was rejected: %v", target, invalidErr)
+		return fmt.Sprintf("cannot reach %s: the TLS certificate was rejected: %v", target, invalidErr)
 	}
 
 	// Op == "dial" означает, что до обмена данными дело не дошло вовсе.
@@ -156,23 +183,23 @@ func requestError(target string, err error) error {
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
 		switch {
 		case errors.Is(err, syscall.ECONNREFUSED):
-			return fmt.Errorf("cannot reach %s: connection refused, nothing is listening on that port", target)
+			return fmt.Sprintf("cannot reach %s: connection refused, nothing is listening on that port", target)
 		case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
-			return fmt.Errorf("cannot reach %s: no route to that address from this machine", target)
+			return fmt.Sprintf("cannot reach %s: no route to that address from this machine", target)
 		case opErr.Timeout():
-			return fmt.Errorf("cannot reach %s: the connection attempt timed out with no reply — the address has to be reachable from the machine running nfo_updater, which is not necessarily the one your browser runs on", target)
+			return fmt.Sprintf("cannot reach %s: the connection attempt timed out with no reply — the address has to be reachable from the machine running nfo_updater, which is not necessarily the one your browser runs on", target)
 		}
-		return fmt.Errorf("cannot reach %s: %v", target, opErr.Err)
+		return fmt.Sprintf("cannot reach %s: %v", target, opErr.Err)
 	}
 
 	// Соединение установилось, а ответа не дождались: это уже про сервер,
 	// а не про сеть, и путать одно с другим не стоит.
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return fmt.Errorf("%s accepted the connection but did not answer in time", target)
+		return fmt.Sprintf("%s accepted the connection but did not answer in time", target)
 	}
 
-	return fmt.Errorf("cannot reach %s: %v", target, err)
+	return fmt.Sprintf("cannot reach %s: %v", target, err)
 }
 
 // checkStatus переводит код ответа в осмысленную ошибку.
@@ -186,10 +213,72 @@ func checkStatus(code int) error {
 	case code >= 200 && code < 300:
 		return nil
 	case code == http.StatusUnauthorized, code == http.StatusForbidden:
-		return fmt.Errorf("the server is reachable but rejected the API key (http status %d)", code)
+		return &Rejected{msg: fmt.Sprintf(
+			"the server is reachable but rejected the API key (http status %d)", code)}
 	case code == http.StatusNotFound:
-		return fmt.Errorf("endpoint not found (http status 404), check the server address")
+		return &Rejected{msg: "endpoint not found (http status 404), check the server address"}
 	default:
-		return fmt.Errorf("unexpected http status %d", code)
+		// Пятисотые и прочая экзотика — не повод заставлять человека
+		// перенабирать заведомо правильный ключ: это сервер сейчас
+		// не в форме, а не ввод неверен.
+		return &Unreachable{msg: fmt.Sprintf("the server answered with an unexpected http status %d", code)}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Проверка одного только адреса
+// ---------------------------------------------------------------------------
+
+// reachPaths — эндпоинты, отвечающие БЕЗ авторизации.
+//
+// У Emby и Jellyfin это /System/Info/Public: тот же /System/Info, только
+// урезанный до сведений, которые сервер показывает кому угодно. У Plex —
+// /identity, который отвечает и без токена; именно поэтому Ping для Plex
+// им не пользуется, а спрашивает список секций.
+var reachPaths = map[string]string{
+	"emby":     "/System/Info/Public",
+	"jellyfin": "/System/Info/Public",
+	"plex":     "/identity",
+}
+
+// Reach проверяет ТОЛЬКО адрес: стоит ли по нему сервер и тот ли он, за кого
+// себя выдаёт. Про ключ здесь не спрашивается ничего.
+//
+// Нужно затем, чтобы разделить два вопроса, которые Ping сваливает в один.
+// Мастер настройки спрашивает адрес и ключ по очереди, и человек, ошибившийся
+// в адресе, должен узнать об этом сразу — до того, как пойдёт искать ключ
+// в настройках сервера, и не получив потом предложение перенабрать заодно
+// и правильный ключ.
+func Reach(ctx context.Context, name, rawURL string, client *http.Client) error {
+	path, ok := reachPaths[strings.ToLower(name)]
+	if !ok {
+		return fmt.Errorf("internal error: no reachability endpoint for media server %q", name)
+	}
+	base := normalizeURL(rawURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return fmt.Errorf("build request for %s: %w", base+path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return requestError(base, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		// Сервер на месте и отвечает — просто закрыт целиком. Для проверки
+		// адреса это успех: разбираться с доступом будет следующий шаг.
+		return nil
+	case resp.StatusCode == http.StatusNotFound:
+		return &Rejected{msg: fmt.Sprintf("something answered at %s, but it does not look like a media server of this kind (http status 404) — check the address, and that there is no extra path in it", base)}
+	default:
+		return &Unreachable{msg: fmt.Sprintf("%s answered with an unexpected http status %d", base, resp.StatusCode)}
 	}
 }
