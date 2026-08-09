@@ -205,7 +205,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Рабочая папка чистится только ПОСЛЕ успешной проверки ключей: если
 	// прогон не начался, недоупакованный остаток прошлого прогона (если тот
 	// упал) тоже не трогаем — он может пригодиться для разбора.
+	//
+	// Но перед очисткой этот остаток надо упаковать. В рабочей папке лежат
+	// ОРИГИНАЛЫ файлов, которые прошлый прогон уже успел переписать на диске,
+	// и другой их копии не существует нигде. ResetWorkDir делает RemoveAll,
+	// то есть прогон, следующий за аварийно прерванным, молча уничтожал
+	// единственный путь назад.
 	if cfg.BackupEnabled {
+		recoverInterruptedBackups(deps)
 		if err := backup.ResetWorkDir(cfg.BackupDir); err != nil {
 			logger.Event("[ERROR] cannot prepare backup work dir: %v", err)
 			return err
@@ -463,16 +470,39 @@ func finalizeBackups(deps *Deps) {
 	if !deps.Config.BackupEnabled {
 		return
 	}
+	packBackups(deps, "[BACKUP_ARCHIVED] %s: %s", "finalize")
+}
+
+// recoverInterruptedBackups упаковывает то, что осталось в рабочей папке от
+// прогона, не дошедшего до конца, — прерванного сигналом, убитого OOM killer
+// или оборвавшегося вместе с машиной.
+//
+// Это единственная защита от потери оригиналов. Файлы на диске прошлый прогон
+// уже переписал, а их копии до архива не доехали; следующий за ним прогон
+// начинал с RemoveAll рабочей папки, и откатываться становилось не к чему.
+//
+// Отметка времени берётся текущая, а не та, когда оригиналы были сохранены.
+// Ротация архивов идёт по именам, и архив с задним числом мог бы вылететь
+// из неё первым — именно тот, который дороже прочих. О том, что архив
+// восстановительный, говорит отдельная строка в логе.
+func recoverInterruptedBackups(deps *Deps) {
+	packBackups(deps,
+		"[BACKUP_RECOVERED] %s: originals left behind by an interrupted run archived to %s",
+		"recover")
+}
+
+// packBackups — общая часть обоих режимов упаковки.
+func packBackups(deps *Deps, eventFormat, what string) {
 	now := time.Now()
 	for _, category := range []string{backup.CategoryMovies, backup.CategoryTVShows} {
 		archivePath, err := backup.Finalize(deps.Config.BackupDir, category, deps.Config.BackupLimit, now)
 		if err != nil {
 			deps.Stats.IncError()
-			deps.Logger.Event("[ERROR] finalize %s backup: %v", category, err)
+			deps.Logger.Event("[ERROR] %s %s backup: %v", what, category, err)
 			continue
 		}
 		if archivePath != "" {
-			deps.Logger.Event("[BACKUP_ARCHIVED] %s: %s", category, archivePath)
+			deps.Logger.Event(eventFormat, category, archivePath)
 		}
 	}
 }
@@ -480,3 +510,12 @@ func finalizeBackups(deps *Deps) {
 func isNFO(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".nfo")
 }
+
+// maxNFOSize — потолок размера файла, который мы вообще готовы прочитать
+// в память.
+//
+// Настоящий .nfo — это единицы килобайт; четыре мегабайта с запасом
+// перекрывают даже самый разговорчивый экспорт с полным списком актёров.
+// Всё, что больше, — это не метаданные, а что-то, чему просто дали такое
+// расширение, и втягивать его целиком незачем.
+const maxNFOSize = 4 << 20

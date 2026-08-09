@@ -70,6 +70,27 @@ func processShowDir(ctx context.Context, deps *Deps, showDir, showNFOPath string
 		if info.IsDir() || path == showNFOPath {
 			return nil
 		}
+		// Отбор по расширению обязателен ДО чтения. Без него сюда попадал
+		// каждый файл папки сериала, и os.ReadFile втягивал в память целиком
+		// сам видеофайл — все двадцать гигабайт сезона, — только чтобы
+		// DetectFileType посмотрел на первый тег. На живой медиатеке это
+		// заканчивалось тем, что процесс убивал OOM killer, а человек видел
+		// в консоли одно слово "Killed" без всякого объяснения.
+		//
+		// Обход фильмов фильтровал по .nfo с самого начала (см. isNFO
+		// в processor.go); здесь фильтра просто не было.
+		if !isNFO(path) {
+			return nil
+		}
+		// Второй рубеж, на случай .nfo неправдоподобного размера: настоящий
+		// файл метаданных — это единицы килобайт, и читать в память нечто
+		// на порядки большее незачем ни при каких обстоятельствах.
+		if info.Size() > maxNFOSize {
+			deps.Stats.IncError()
+			deps.Logger.Event("[ERROR] %s: %d bytes is far too large for an NFO file, skipped",
+				path, info.Size())
+			return nil
+		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			deps.Stats.IncError()

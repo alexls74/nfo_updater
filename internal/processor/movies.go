@@ -109,6 +109,13 @@ func ProcessMovieFile(ctx context.Context, deps *Deps, path string) error {
 		return nil
 	}
 
+	if info, err := os.Stat(path); err == nil && info.Size() > maxNFOSize {
+		deps.Stats.IncError()
+		deps.Logger.Event("[ERROR] %s: %d bytes is far too large for an NFO file, skipped",
+			path, info.Size())
+		return nil
+	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		deps.Stats.IncError()
