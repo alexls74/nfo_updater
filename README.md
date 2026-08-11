@@ -112,10 +112,8 @@ Rules worth knowing before you edit:
 
 Backups are zip archives, one per pass, kept separately for movies and TV shows:
 
-```
-backups/Movies/2026-08-10_03-00-11.zip
-backups/TVShows/2026-08-10_03-00-11.zip
-```
+***backups/Movies/2026-08-10_03-00-11.zip<br>
+backups/TVShows/2026-08-10_03-00-11.zip***
 
 Each archive holds only the files that pass actually changed, every one with its full path. The oldest archives beyond `BACKUP_LIMIT` are deleted as new ones appear, counted per category.
 
