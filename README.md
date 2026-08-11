@@ -72,9 +72,9 @@ The same script handles the whole lifecycle. Run it the same way, replacing `ins
 
 #### Configuration
 
-The installation wizard provides mandatory settings. All settings are described below.
+The installation wizard provides mandatory settings. All settings of `config.conf` are described below.
 
-##### API keys
+#### API keys
 
 All services have to be configured. Every key is verified at the start of each pass, so one that has expired or been revoked is reported in the log right away.
 
@@ -88,7 +88,7 @@ All services have to be configured. Every key is verified at the start of each p
 
 OMDb and MDBList accept several keys, comma-separated without spaces. They are used one after another as each daily quota runs out.
 
-##### Settings
+#### Settings
 
 | Setting | What it is for |
 | --- | --- |
@@ -117,7 +117,7 @@ backups/TVShows/2026-08-10_03-00-11.zip***
 
 Each archive holds only the files that pass actually changed, every one with its full path. The oldest archives beyond `BACKUP_LIMIT` are deleted as new ones appear, counted per category.
 
-##### Applying changes
+#### Applying changes
 
 If the service is running, tell it to re-read the file:
 
@@ -131,7 +131,7 @@ If a pass is running at that moment, the new configuration is applied as soon as
 
 #### Usage
 
-##### As a service
+#### As a service
 
 Installed with a schedule, NFO Updater runs as a systemd service and needs no attention.
 The commands you may still want:
@@ -146,7 +146,7 @@ sudo systemctl stop nfo_updater         # stop, waiting for a running pass to fi
 
 A pass in progress is never cut short: on stop the daemon finishes the file it is on, packs its backups and only then exits. systemd waits up to five minutes for this.
 
-##### One-shot
+#### One-shot
 
 Without a schedule — or whenever you want a pass right now — run it yourself:
 
