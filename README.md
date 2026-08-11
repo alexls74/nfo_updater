@@ -24,7 +24,7 @@ Keeps the ratings in your Kodi-style `.nfo` files up to date.
 
 ### Debian / Ubuntu
 
-You will need a 64-bit x86 Linux machine, `curl` or `wget`, `tar`, `sha256sum`. 
+You will need a 64-bit x86 Linux machine, `curl` or `wget`, `tar`, `sha256sum`.<br>
 `Systemd` is needed only if you want the library updated on a schedule.
 
 To install:
@@ -67,7 +67,7 @@ The same script handles the whole lifecycle. Run it the same way, replacing `ins
 | `remove` | Remove the program and the service. |
 | `help` | Show the list of commands. |
 
-`update` replaces the binary in place, whichever directory it was installed into.
+`update` replaces the binary in place, whichever directory it was installed into.<br>
 `remove` leaves your configuration, database, logs and backups untouched — see [Where things live](#where-things-live) if you want them gone too.
 
 #### Configuration
@@ -178,7 +178,8 @@ It performs a single pass over the library and exits. Only one instance works at
 | Program | `/usr/local/bin/nfo_updater`, or `~/.local/bin/nfo_updater` with `--user` |
 | Service unit | `/etc/systemd/system/nfo_updater.service` |
 
-The **Configuration** can be redirected using the `--config` flag. **Rating cache**, **Logs**, **Backups** can be replaced with custom paths in the configuration file.
+The **Configuration** can be redirected using the `--config` flag.<br>
+**Rating cache**, **Logs**, **Backups** can be replaced with custom paths in the configuration file.
 
 ## Roadmap
 
