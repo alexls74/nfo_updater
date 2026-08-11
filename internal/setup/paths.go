@@ -87,8 +87,7 @@ func checkMediaDir(path string) error {
 //
 // Каталога может ещё не быть, и это нормально — программа создаст его сама.
 // Поэтому при отсутствии проверяется ближайший существующий предок: если
-// в него можно писать, создание удастся. Так вопрос "а заведётся ли база
-// на этом диске" получает ответ сразу, а не при первом прогоне.
+// в него можно писать, создание удастся.
 func checkDataDir(path string) error {
 	info, err := os.Stat(path)
 	switch {
@@ -210,9 +209,6 @@ func askMediaPaths(p *Prompt, question string, current []string, accept func(pat
 		prompt := question
 		hint := ""
 		if len(out) > 0 {
-			// С глаголом: голое "Another directory" читается ещё и как
-			// "а теперь другой каталог, вместо этого". Подсказка вынесена
-			// в скобки, как во всех остальных вопросах мастера.
 			prompt = "Add another directory"
 			hint = "leave empty when done"
 		}

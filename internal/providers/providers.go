@@ -42,8 +42,7 @@ type Provider interface {
 
 // ErrNotFound — тайтла с таким ID у провайдера НЕТ вовсе. Почти всегда это
 // значит, что ID в .nfo неверный: базы провайдеров пополняются из общих
-// источников, и одновременное незнание тайтла всеми — куда более редкое
-// событие, чем опечатка в файле.
+// источников, и одновременное незнание тайтла всеми — редкое событие.
 var ErrNotFound = errors.New("title not found by this provider")
 
 // ErrNoRatings — тайтл у провайдера ЕСТЬ, но рейтингов у него нет ни одного.
@@ -51,10 +50,7 @@ var ErrNotFound = errors.New("title not found by this provider")
 //
 // Отделено от ErrNotFound намеренно, и это не педантизм: два случая требуют
 // от пользователя противоположных действий. При ErrNotFound чинить надо
-// файл, при ErrNoRatings чинить нечего вовсе. Пока оба сваливались в одно
-// сообщение "no rating found from any provider", неверный ID в файле
-// выглядел как отказ провайдеров — и толкал искать несуществующую
-// неисправность в сети и ключах.
+// файл, при ErrNoRatings чинить нечего вовсе.
 var ErrNoRatings = errors.New("title has no ratings at this provider")
 
 var ErrUnsupportedID = errors.New("provider does not support the given ID combination")
@@ -66,7 +62,7 @@ var ErrUnsupportedID = errors.New("provider does not support the given ID combin
 var ErrQuotaExhausted = errors.New("provider quota exhausted for today")
 
 // KeyErrorKind различает две ситуации, которые до сих пор сваливались
-// в NetworkError и потому лечились одинаково неправильно — ретраями
+// в NetworkError и потому лечились одинаково неправильно — повторами
 // и накруткой circuit breaker.
 type KeyErrorKind int
 

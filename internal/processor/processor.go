@@ -148,8 +148,7 @@ func NewDeps(cfg *config.Config, database *db.DB, logger *logging.Logger, httpCl
 // Порядок первых двух шагов важен. Сначала берётся flock, и только потом
 // открывается файл лога: иначе запуск, отклонённый из-за занятой
 // блокировки, успевал бы создать пустой лог, а ротация списала бы за него
-// слот из LOG_LIMIT — десяток параллельных попыток вытеснил бы всю
-// историю логов пустышками.
+// слот из LOG_LIMIT.
 func (r *Runner) Run(ctx context.Context) error {
 	cfg, bootLogger := r.current()
 
@@ -358,8 +357,7 @@ func checkKeys(ctx context.Context, deps *Deps) error {
 		seen[c.Name()] = true
 	}
 	// TMDb проверяем даже при TMDB_RATING=no: он остаётся единственным
-	// источником даты для <premiered>, и раньше его негодный ключ вообще
-	// ничем себя не проявлял, кроме молчаливой строки в Detail-логе.
+	// источником даты для <premiered>.
 	if deps.TMDb != nil && !seen[deps.TMDb.Name()] {
 		checkers = append(checkers, deps.TMDb)
 	}
@@ -372,8 +370,6 @@ func checkKeys(ctx context.Context, deps *Deps) error {
 	usableByProvider := make(map[string]int)
 	checkedProviders := make(map[string]bool)
 	// helpShown — справка о получении ключа печатается один раз на провайдера.
-	// Пять протухших ключей OMDb в пуле не должны дать пять одинаковых
-	// абзацев со ссылкой.
 	helpShown := make(map[string]bool)
 	networkFailures := 0
 
@@ -513,9 +509,4 @@ func isNFO(path string) bool {
 
 // maxNFOSize — потолок размера файла, который мы вообще готовы прочитать
 // в память.
-//
-// Настоящий .nfo — это единицы килобайт; четыре мегабайта с запасом
-// перекрывают даже самый разговорчивый экспорт с полным списком актёров.
-// Всё, что больше, — это не метаданные, а что-то, чему просто дали такое
-// расширение, и втягивать его целиком незачем.
 const maxNFOSize = 4 << 20

@@ -14,7 +14,7 @@ import (
 // временем неизбежны, если держать их порознь.
 type KeyHelp struct {
 	Provider string // как его возвращает Provider.Name() — по этому полю идёт поиск
-	Display  string // человекочитаемое имя сервиса
+	Display  string // имя сервиса
 	Setting  string // имя параметра в config.conf
 	URL      string // страница, где ключ выдают
 

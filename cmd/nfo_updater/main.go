@@ -27,9 +27,6 @@ import (
 )
 
 // defaultConfigPath — путь по умолчанию, ~/.config/nfo_updater/config.conf.
-// Переопределяется флагом --config, что нужно и для тестовых запусков, и для
-// нескольких экземпляров с разными библиотеками (правда, lock-файл у них
-// общий — см. internal/lock).
 //
 // Вычисляется один раз при старте, а не константой: путь зависит от домашнего
 // каталога текущего пользователя. Пустая строка означает, что домашний каталог
@@ -53,22 +50,17 @@ func run() int {
 	)
 
 	fs := flag.NewFlagSet("nfo_updater", flag.ContinueOnError)
-	fs.SetOutput(io.Discard) // usage печатаем сами, флаговый формат нам не годится
+	fs.SetOutput(io.Discard)
 	fs.BoolVar(&daemonMode, "d", false, "")
 	fs.BoolVar(&showInfo, "v", false, "")
 	// Регистр здесь значащий: пакет flag различает -v и -V. Первый — сводка
 	// путей, второй — одна строка с версией.
 	fs.BoolVar(&showVersion, "V", false, "")
 	fs.BoolVar(&showVersion, "version", false, "")
-	// --check-config намеренно не документирован в -h: он служебный, для
-	// разработки и разбора проблем. Обычному пользователю хватает того, что
-	// обычный запуск сам проверит конфиг и ключи перед началом работы.
+	// --check-config намеренно не документирован в -h: он служебный.
 	fs.BoolVar(&checkConfig, "check-config", false, "")
 	fs.BoolVar(&setupMode, "setup", false, "")
-	// --print-unit тоже не документирован в -h, и по той же причине, что
-	// --check-config: он адресован установочному скрипту, а не человеку.
-	// В справке он породил бы вопрос "куда мне девать этот текст", ответ
-	// на который — "никуда, скрипт сам".
+	// --print-unit тоже не документирован в -h, и по той же причине.
 	//
 	// Путь к бинарнику приходит аргументом флага, а не позиционным: при
 	// установке юнит генерирует бинарник, лежащий ещё во временном каталоге,
@@ -89,8 +81,7 @@ func run() int {
 	}
 	// --version отвечает раньше всех прочих проверок и ничего не читает
 	// с диска. Так флаг работает и на системе, где конфига ещё нет, и на
-	// системе, где он испорчен, — а именно там его и спрашивает установочный
-	// скрипт, определяя установленную версию перед обновлением.
+	// системе, где он испорчен.
 	if showVersion {
 		fmt.Println(version.String())
 		return exitcode.OK
@@ -103,8 +94,7 @@ func run() int {
 
 	// Режимы работы взаимоисключающи, и это проверяется явно, а не решается
 	// молчаливым приоритетом. "--setup -d" — не "настроить, а потом стать
-	// демоном", а опечатка, и выполнить половину написанного хуже, чем
-	// отказаться и сказать, что именно не сочетается.
+	// демоном".
 	if modes := requestedModes(daemonMode, showInfo, checkConfig, setupMode, printUnit); len(modes) > 1 {
 		fmt.Fprintf(os.Stderr, "these flags cannot be combined: %s\n\n", strings.Join(modes, ", "))
 		usage(os.Stderr)
@@ -124,8 +114,7 @@ func run() int {
 	// Обе установочные команды отказываются работать из-под sudo. Под ним
 	// $HOME становится /root: мастер записал бы ключи API в /root/.config,
 	// где обычный пользователь их не найдёт и прав на них не имеет,
-	// а --print-unit выдал бы юнит с User=root. Поведение sudo с HOME
-	// разнится между дистрибутивами, так что угадывать нельзя.
+	// а --print-unit выдал бы юнит с User=root.
 	//
 	// Настоящий вход под root (SUDO_USER пуст) — не этот случай: на NAS
 	// с единственной учётной записью это нормальный режим, и запрещать его
@@ -193,7 +182,7 @@ func run() int {
 	}
 	defer database.Close()
 
-	// Загрузочный логгер пишет только в консоль: файл лога заводится внутри
+	// Загрузочный журнал пишет только в консоль: файл лога заводится внутри
 	// прогона, после захвата блокировки.
 	bootLogger := logging.New(nil, os.Stdout, cfg.LogVerbose)
 	runner := processor.NewRunner(cfg, database, configPath, bootLogger)
@@ -259,8 +248,7 @@ func doSetup(ctx context.Context, configPath string) int {
 
 	// Единственное, что мастер сообщает наружу помимо факта успеха: нужна
 	// ли служба. Через код возврата, а не через stdout, потому что stdout
-	// у мастера уже занят под юнит в соседнем режиме, и один машинный
-	// канал на две разные вещи — приглашение к путанице.
+	// у мастера уже занят под юнит в соседнем.
 	if res.Scheduled {
 		return exitcode.ServiceWanted
 	}
@@ -319,15 +307,13 @@ func recordKeyUsage(configPath string, usage map[string][]int) {
 // требование команды `service on`: она добавляет службу к уже установленной
 // программе, и мастер при этом не запускается.
 //
-// Валидация выполняется полная. Сгенерировать юнит по сломанному конфигу
-// значит отложить ошибку до systemctl start, где она будет выглядеть
-// как status=1/FAILURE без единого намёка на причину.
+// Валидация выполняется полная, хотя в текст юнита из конфига не попадает
+// ничего, кроме пути к файлу..
 func doPrintUnit(configPath, binaryPath string) int {
-	cfg, err := config.Load(configPath)
-	if err != nil {
+	if _, err := config.Load(configPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "no configuration file at %s\n"+
-				"Run nfo_updater --setup first: the unit file needs the media library paths.\n",
+				"Run nfo_updater --setup first: the service starts with this file and cannot work without it.\n",
 				configPath)
 			return exitcode.Config
 		}
@@ -335,7 +321,7 @@ func doPrintUnit(configPath, binaryPath string) int {
 		return exitcode.Config
 	}
 
-	text, err := unit.Generate(cfg, configPath, binaryPath)
+	text, err := unit.Generate(configPath, binaryPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot generate the unit file: %v\n", err)
 		return exitcode.Error
@@ -346,15 +332,10 @@ func doPrintUnit(configPath, binaryPath string) int {
 
 // doShowInfo — режим -v: версия и пути, с которыми программа работает.
 // Ничего не проверяет и ничего не создаёт.
-//
-// Ошибки валидации здесь молчат намеренно: спрошено "чем ты работаешь",
-// а не "всё ли в порядке". Незаполненный конфиг — обычное состояние сразу
-// после установки, и ругаться на него в ответ на запрос версии незачем;
-// обычный запуск всё равно откажется стартовать и всё объяснит.
 func doShowInfo(configPath string) int {
 	cfg, err := config.Load(configPath)
 	if cfg != nil {
-		// Конфиг прочитан. Прошёл он валидацию или нет — нам здесь неважно.
+		// Конфиг прочитан.
 		fmt.Println(cfg.Describe(configPath))
 		return exitcode.OK
 	}
@@ -391,7 +372,7 @@ func reportConfigError(configPath string, err error) {
 // провалидирован к этому моменту, остаётся проверить по сети ключи и
 // медиасерверы. Файлы медиатеки не трогаются.
 //
-// Оговорка: проверка ключей OMDb стоит по одному настоящему запросу на ключ
+// Проверка ключей OMDb стоит по одному настоящему запросу на ключ
 // и честно списывается с суточной квоты — у сервиса нет способа проверить
 // ключ бесплатно. У MDBList и TMDb проверка бесплатна.
 //
@@ -429,8 +410,7 @@ func doOneShot(ctx context.Context, runner *processor.Runner) int {
 //
 // Цикл расписания живёт ЗДЕСЬ, а не внутри пакета daemon, намеренно:
 // так всё поведение демона — когда он просыпается, что делает по сигналам,
-// когда перечитывает конфиг — читается в одном месте, а не размазано
-// между main и пакетом.
+// когда перечитывает конфиг — читается в одном месте.
 func doDaemon(ctx context.Context, cfg *config.Config, configPath string, database *db.DB,
 	runner *processor.Runner, bootLogger *logging.Logger) int {
 
@@ -520,7 +500,7 @@ func scheduleLoop(ctx context.Context, d *daemon.Daemon, logger *logging.Logger,
 			// Сюда попасть нельзя: конфиг валидируется до старта и при
 			// reload. Но если вдруг — спим сутки, а не крутим цикл впустую.
 			logger.Event("[ERROR] invalid schedule %q: %v", expr, err)
-			if !sleepUntil(ctx, time.Now().Add(24*time.Hour), scheduleChanged) {
+			if sleepUntil(ctx, time.Now().Add(24*time.Hour), scheduleChanged) == wakeStop {
 				return
 			}
 			continue
@@ -529,45 +509,58 @@ func scheduleLoop(ctx context.Context, d *daemon.Daemon, logger *logging.Logger,
 		next := sched.Next(time.Now())
 		if next.IsZero() {
 			logger.Event("[ERROR] schedule %q never matches any time, no runs will be started", expr)
-			if !sleepUntil(ctx, time.Now().Add(24*time.Hour), scheduleChanged) {
+			if sleepUntil(ctx, time.Now().Add(24*time.Hour), scheduleChanged) == wakeStop {
 				return
 			}
 			continue
 		}
 
 		logger.Event("[SCHEDULE] next run at %s", next.Format(time.RFC3339))
-		if !sleepUntil(ctx, next, scheduleChanged) {
+		switch sleepUntil(ctx, next, scheduleChanged) {
+		case wakeStop:
 			return
+		case wakeReschedule:
+			// Перезагрузка конфига сама по себе прогон не начинает: цикл
+			// возвращается к началу и пересчитывает срок по новому
+			// расписанию. Иначе любой reload запускал бы сканирование
+			// медиатеки — а reload делают ради правки конфига.
+			continue
+		case wakeDue:
+			// TriggerRun вызывается синхронно, чтобы wg.Wait() при остановке
+			// дождался завершения прогона. Параллельные запуски исключены
+			// самим демоном, а между процессами — flock внутри Run.
+			d.TriggerRun(ctx)
 		}
-
-		// TriggerRun вызывается синхронно, чтобы wg.Wait() при остановке
-		// дождался завершения прогона. Параллельные запуски исключены
-		// самим демоном, а между процессами — flock внутри Run.
-		d.TriggerRun(ctx)
 	}
 }
 
-// sleepUntil ждёт указанного момента. Возвращает false, если пора
-// завершаться, и true, если можно продолжать (срок наступил или
-// расписание изменилось).
-func sleepUntil(ctx context.Context, until time.Time, scheduleChanged <-chan struct{}) bool {
+// wake — причина, по которой закончилось ожидание в sleepUntil.
+type wake int
+
+const (
+	wakeStop       wake = iota // контекст отменён, пора завершаться
+	wakeDue                    // наступил срок по расписанию — запускать прогон
+	wakeReschedule             // конфиг перезагружен — пересчитать срок и ждать дальше
+)
+
+// sleepUntil ждёт указанного момента и сообщает, почему ожидание закончилось.
+func sleepUntil(ctx context.Context, until time.Time, scheduleChanged <-chan struct{}) wake {
 	timer := time.NewTimer(time.Until(until))
 	defer timer.Stop()
 
 	select {
 	case <-ctx.Done():
-		return false
+		return wakeStop
 	case <-scheduleChanged:
-		return true
+		return wakeReschedule
 	case <-timer.C:
-		return true
+		return wakeDue
 	}
 }
 
 // scheduleOf возвращает расписание из конфига или значение по умолчанию.
 // Пустой SCHEDULE в режиме демона означает не "не запускать никогда",
-// а "раз в неделю" — молчаливо неработающий демон был бы худшим из
-// возможных поведений.
+// а "раз в неделю".
 func scheduleOf(cfg *config.Config) string {
 	if cfg.Schedule != "" {
 		return cfg.Schedule

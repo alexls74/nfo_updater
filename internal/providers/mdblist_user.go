@@ -25,11 +25,7 @@ type UserInfo struct {
 
 // checkKey проверяет один ключ MDBList через /user.
 //
-// Вызов /user НЕ расходует суточную квоту — проверено живыми запросами:
-// два обращения подряд оставили api_requests_count нулевым, а один
-// обычный запрос данных сразу после них дал +1. Поэтому noteRequest
-// здесь намеренно не вызывается: проверка всех ключей MDBList перед
-// каждым прогоном бесплатна.
+// Вызов /user НЕ расходует суточную квоту.
 func (p *MDBListProvider) checkKey(ctx context.Context, key string, index int) error {
 	_, err := p.fetchUserInfo(ctx, key, index)
 	return err

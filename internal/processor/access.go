@@ -51,8 +51,7 @@ func checkWritableDir(path string) error {
 }
 
 // Константы режима для access(2). В syscall они не экспортируются
-// платформонезависимо, а тянуть golang.org/x/sys ради трёх чисел незачем:
-// значения зафиксированы POSIX и одинаковы на всех Linux-архитектурах.
+// платформонезависимо.
 const (
 	unixXOK = 0x1
 	unixWOK = 0x2

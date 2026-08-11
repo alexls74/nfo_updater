@@ -33,7 +33,7 @@ func DetectActorIndent(content string) string {
 
 // FixLegacyUniqueIDs добавляет современные <uniqueid type="imdb">/<uniqueid
 // type="tmdb"> для уже известных ID, но только если такого <uniqueid> ещё
-// нет. Легаси-теги никогда не трогаются и не удаляются.
+// нет. Устаревшие теги не удаляются.
 func FixLegacyUniqueIDs(content, imdbID, tmdbID string) (updated string, changed bool) {
 	indent := DetectIndent(content)
 
@@ -77,8 +77,7 @@ func FixMissingPremiered(content, premieredDate string) (updated string, changed
 // выше актёров, она первой и показывается. Фикс возвращает привычный вид.
 //
 // Отсюда и отдельный флаг CREW_ORDER_FIX. Правка косметическая, вкусовая,
-// и решать за пользователя, какой порядок ему приятнее, мы не вправе —
-// тогда как остальные наши правки чинят объективно неверные данные.
+// и решать за пользователя, какой порядок ему приятнее.
 //
 // Флаг намеренно НЕ привязан к EMBY_ENABLED. Секция медиасервера в конфиге
 // необязательна: пользователь Emby вполне может не заполнять адрес и ключ,

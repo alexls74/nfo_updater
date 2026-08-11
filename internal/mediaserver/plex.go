@@ -15,9 +15,7 @@ import (
 // GET /library/sections/{id}/refresh. Поэтому секции либо перечислены
 // в конфиге, либо мы спрашиваем их у самого сервера.
 //
-// ВНИМАНИЕ: код написан по документации API и на живом Plex не проверялся —
-// у автора нет доступа к серверу. Эндпоинты простые и стабильные много лет,
-// но если что-то пойдёт не так, начинать разбор стоит отсюда.
+// ВНИМАНИЕ: код написан по документации API.
 type plexServer struct {
 	baseURL    string
 	token      string
@@ -97,9 +95,7 @@ func (p *plexServer) librarySections(ctx context.Context) ([]plexSection, error)
 
 // mediaSectionIDs отбирает только секции фильмов и сериалов.
 //
-// Когда PLEX_SECTION_IDS не заполнен, мы обновляем библиотеку сами, и гонять
-// сканирование по музыке и фотографиям, которых наши .nfo не касаются,
-// незачем. Если пользователю нужно иначе — он перечислит ID явно.
+// Когда PLEX_SECTION_IDS не заполнен, мы обновляем библиотеку сами.
 func mediaSectionIDs(sections []plexSection) []string {
 	var out []string
 	for _, s := range sections {

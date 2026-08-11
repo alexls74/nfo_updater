@@ -9,12 +9,6 @@ import (
 )
 
 // embyLike — общая реализация для Emby и Jellyfin.
-//
-// Jellyfin — форк Emby, и эндпоинты, которые нужны нам, у него сегодня те же:
-// GET /System/Info и POST /Library/Refresh. Расходится только способ передать
-// ключ, поэтому он вынесен в поле-функцию. Конструктор Jellyfin живёт
-// в jellyfin.go: форки со временем расходятся, и когда это случится, его
-// реализации будет куда расти, не трогая Emby.
 type embyLike struct {
 	name    string
 	baseURL string

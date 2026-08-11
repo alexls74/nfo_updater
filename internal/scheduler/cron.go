@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Schedule — распарсенное cron-выражение из 5 полей: minute hour dom month dow.
+// Schedule — cron-выражение из 5 полей: minute hour dom month dow.
 type Schedule struct {
 	minutes, hours, doms, months, dows map[int]bool
 	domIsWildcard, dowIsWildcard       bool

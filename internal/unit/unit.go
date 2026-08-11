@@ -9,20 +9,16 @@
 // не запуская мастер вовсе, и тащить за собой машинерию диалога ей незачем.
 //
 // Юнит нельзя положить в репозиторий готовым файлом: в нём путь к бинарнику,
-// путь к конфигу, имя пользователя и список каталогов медиатеки. Всё, кроме
-// первого, лежит в конфиге — и разбирать конфиг вторично, на POSIX sh,
-// значит получить вторую, худшую реализацию правил, которые здесь уже
-// написаны и проверены.
+// путь к конфигу и имя пользователя, под которым программа установлена.
+// Всё это выясняется только в момент установки.
 package unit
 
 import (
 	"fmt"
 	"os/user"
 	"path/filepath"
-	"sort"
 	"strings"
 
-	"nfo_updater/internal/config"
 	"nfo_updater/internal/exitcode"
 )
 
@@ -53,10 +49,12 @@ const stopTimeout = 300
 // Вывод детерминирован — тот же конфиг и тот же путь дают тот же текст
 // байт в байт. На этом стоит update: сгенерировать заново, сравнить
 // с установленным, и трогать systemctl daemon-reload только при
-// расхождении. Отсюда же сортировка путей: обход map дал бы случайный
-// порядок, а эта ошибка в проекте уже случалась — она переписывала .nfo
-// на каждом прогоне без единого изменения в содержимом.
-func Generate(cfg *config.Config, configPath, binaryPath string) (string, error) {
+// расхождении.
+//
+// Конфиг аргументом не передаётся: из него в юнит не попадает ничего,
+// кроме пути к самому файлу. Так текст юнита зависит только от того,
+// куда установлена программа, и правка настроек его не устаревает.
+func Generate(configPath, binaryPath string) (string, error) {
 	if !filepath.IsAbs(binaryPath) {
 		return "", fmt.Errorf("the path to the binary must be absolute, got %q", binaryPath)
 	}
@@ -91,14 +89,6 @@ func Generate(cfg *config.Config, configPath, binaryPath string) (string, error)
 	// прогона, и без сети прогон закончится ничем.
 	b.WriteString("After=network-online.target\n")
 	b.WriteString("Wants=network-online.target\n")
-	for _, p := range mountPaths(cfg, configPath, binaryPath) {
-		v, err := unitValue(p)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(&b, "RequiresMountsFor=%s\n", v)
-	}
-
 	b.WriteString("\n[Service]\n")
 	b.WriteString("Type=simple\n")
 	fmt.Fprintf(&b, "User=%s\n", owner)
@@ -171,7 +161,7 @@ func currentOwner() (owner, group string, err error) {
 
 	// Первичная группа по имени читается приятнее, но её имя может и не
 	// найтись (LDAP, урезанный NSS на NAS). Числовой GID systemd понимает
-	// не хуже, поэтому это не повод отказываться от генерации.
+	// не хуже.
 	group = u.Gid
 	if g, gerr := user.LookupGroupId(u.Gid); gerr == nil && g.Name != "" {
 		group = g.Name
@@ -179,69 +169,7 @@ func currentOwner() (owner, group string, err error) {
 	return u.Username, group, nil
 }
 
-// mountPaths — каталоги, без которых службе нечего делать.
-//
-// Главный случай — медиатека на сетевом хранилище. Служба, стартовавшая
-// раньше монтирования, увидит пустой каталог и честно отчитается о нуле
-// обработанных файлов; понять по такому отчёту, что дело в монтировании,
-// нельзя ниоткуда.
-//
-// RequiresMountsFor на пути, который не покрыт ни одним mount-юнитом,
-// безвреден: он раскрывается в корневой -.mount, существующий всегда.
-func mountPaths(cfg *config.Config, configPath, binaryPath string) []string {
-	seen := make(map[string]bool)
-	out := make([]string, 0, 8)
-
-	add := func(p string) {
-		if p == "" || !filepath.IsAbs(p) {
-			return
-		}
-		p = filepath.Clean(p)
-		if seen[p] {
-			return
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-
-	// Каталог бинарника: при установке с --user он лежит в домашнем
-	// каталоге, а тот бывает на отдельном или сетевом разделе.
-	add(filepath.Dir(binaryPath))
-	add(filepath.Dir(configPath))
-	// У базы в конфиге путь к ФАЙЛУ, и файла может ещё не быть —
-	// спрашиваем про каталог.
-	add(filepath.Dir(cfg.DatabasePath))
-	// Логи и бэкапы — только когда включены: выключенных программа
-	// не касается, и ждать их монтирования незачем.
-	if cfg.LogEnabled {
-		add(cfg.LogDir)
-	}
-	if cfg.BackupEnabled {
-		add(cfg.BackupDir)
-	}
-	for _, p := range cfg.MoviesPaths {
-		add(p)
-	}
-	for _, p := range cfg.TVShowsPaths {
-		add(p)
-	}
-
-	sort.Strings(out)
-	return out
-}
-
 // unitValue готовит путь к подстановке в юнит.
-//
-// Две опасности. Знак процента: systemd раскрывает %-спецификаторы прямо
-// в значениях, и каталог с процентом в имени превратился бы в чужой путь
-// или в ошибку разбора; лечится удвоением. Пробел: значения разбираются
-// как список слов, поэтому путь с пробелом берётся в кавычки — в названиях
-// фильмов пробелы обычное дело.
-//
-// Кавычка, обратная косая черта и перевод строки внутри пути — отказ,
-// а не повод изобретать экранирование. В медиатеке такие имена
-// не встречаются, а тихо испорченный юнит обнаружился бы только при
-// systemctl start, где сообщение было бы совсем о другом.
 func unitValue(s string) (string, error) {
 	if strings.ContainsAny(s, "\"'\\\n\r") {
 		return "", fmt.Errorf(

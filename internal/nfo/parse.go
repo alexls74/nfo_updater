@@ -34,8 +34,8 @@ var (
 // ParseIDs извлекает imdb_id и tmdb_id из содержимого .nfo-файла ФИЛЬМА.
 // Приоритет — современные <uniqueid type="...">. Легаси <id> проверяется
 // на формат ^tt\d{7,9}$ — мусор в него не попадёт как валидный ID.
-// ВНИМАНИЕ: для сериалов/серий используйте ParseTVShowIDs/ParseEpisodeInfo
-// из tv.go — там <id> означает СОВСЕМ ДРУГОЕ (tvdb, не imdb).
+// ВНИМАНИЕ: для сериалов/серий используется ParseTVShowIDs/ParseEpisodeInfo
+// из tv.go — там <id> может означать другое (tvdb, не imdb).
 func ParseIDs(content string) (imdbID, tmdbID string) {
 	if m := reUniqueIDImdb.FindStringSubmatch(content); m != nil {
 		imdbID = m[1]
@@ -87,7 +87,7 @@ func HasUserRating(content string) bool {
 //
 // Записи с неизвестным нам name возвращаются как чужие: Source пуст,
 // а KodiName и Max сохранены дословно, чтобы выписать их без потерь.
-// Блок вне <ratings> (легаси <rating> верхнего уровня) не разбирается.
+// Блок вне <ratings> (устаревший <rating> верхнего уровня) не разбирается.
 func ParseRatingsBlock(content string) []RatingEntry {
 	block := reRatingsBlockFind.FindStringSubmatch(content)
 	if block == nil {

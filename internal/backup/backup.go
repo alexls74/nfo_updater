@@ -61,9 +61,7 @@ func Save(backupDir, category, archivePath string, original []byte) error {
 	return nil
 }
 
-// checkArchivePath — страховка от записи мимо рабочей папки. Корректно
-// построенный archivePath такого содержать не может, но цена ошибки здесь
-// слишком высока: путь идёт прямиком в filepath.Join с последующей записью.
+// checkArchivePath — страховка от записи мимо рабочей папки.
 func checkArchivePath(archivePath string) error {
 	if archivePath == "" {
 		return fmt.Errorf("backup: empty archive path")
@@ -123,9 +121,7 @@ func Finalize(backupDir, category string, limit int, at time.Time) (archivePath 
 // zipDir упаковывает содержимое srcDir в destZip.
 //
 // Имена внутри архива пишутся как есть, в UTF-8, и archive/zip сам выставляет
-// флаг 0x800 для не-ASCII имён — этого достаточно и для Kodi, и для Windows.
-// Если распаковщик всё же показывает знаки вопроса вместо кириллицы, дело
-// в его локали (Info-ZIP перекодирует имена в кодировку LANG), а не в архиве.
+// флаг 0x800 для не-ASCII имён.
 func zipDir(srcDir, destZip string) error {
 	f, err := os.Create(destZip)
 	if err != nil {

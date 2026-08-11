@@ -39,9 +39,7 @@ type Logger struct {
 //
 // Detail пишется ИСКЛЮЧИТЕЛЬНО в файл. Если файлового лога нет, Detail
 // не пишется никуда, даже при LOG_VERBOSE=yes: LOG_ENABLED=no — это отказ
-// от подробностей как таковых, и перенаправлять тысячи рутинных строк
-// в консоль или journald вместо файла означало бы забить системный журнал
-// ровно тем, от чего пользователь отказался.
+// от подробностей как таковых.
 func New(fileWriter, consoleWriter io.Writer, verbose bool) *Logger {
 	detailWriter := io.Writer(io.Discard)
 	if fileWriter != nil {
@@ -83,9 +81,6 @@ func New(fileWriter, consoleWriter io.Writer, verbose bool) *Logger {
 // превратился бы там в десяток отдельных записей, часть из которых
 // пустые. У терминала же обратная логика: его читает человек, и рамка
 // ему помогает.
-//
-// Проверка через ModeCharDevice — стандартный для Go способ, не требующий
-// внешних зависимостей.
 func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
@@ -140,16 +135,14 @@ func (l *Logger) Summary(block, line string) {
 	l.consoleOnly.Print(line)
 }
 
-// Имя файла лога: префикс приложения + сортируемый timestamp. Формат времени
-// тот же, что у архивов бэкапов, поэтому лексикографическая сортировка имён
-// совпадает с сортировкой по времени создания.
+// Имя файла лога: префикс приложения + сортируемый timestamp.
 const (
 	logFilePrefix     = "nfo_updater_"
 	logFileTimeFormat = "2006-01-02_15-04-05"
 	logFileExt        = ".log"
 )
 
-// reLogFileName ограничивает ротацию файлами, которые создали мы сами.
+// reLogFileName ограничивает ротацию файлами, которые создали сами.
 // LOG_DIR вполне может оказаться общим каталогом вроде /var/log, и удалять
 // оттуда чужие файлы по счётчику недопустимо.
 var reLogFileName = regexp.MustCompile(
@@ -165,10 +158,7 @@ type RunLog struct {
 // прогона, пишет в него шапку и удаляет лишние старые логи.
 //
 // Ротация выполняется ПОСЛЕ создания нового файла, чтобы limit означал
-// "столько файлов лежит на диске" — ровно как BACKUP_LIMIT для архивов.
-// Ошибка ротации не отменяет уже открытый лог: RunLog возвращается вместе
-// с ошибкой, и вызывающий код может записать жалобу в этот же файл вместо
-// того, чтобы падать из-за неудалённого старья.
+// "столько файлов лежит на диске".
 func OpenRunLog(dir string, limit int, at time.Time, header string) (*RunLog, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create log dir %s: %w", dir, err)

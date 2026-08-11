@@ -132,8 +132,8 @@ func (p *OMDbProvider) fetchWithKey(ctx context.Context, key string, keyIndex in
 // только по тексту. Вторая: сообщение об ошибке ключа приходит и в теле,
 // поэтому на статус мы не полагаемся вовсе — если сервис однажды ответит
 // тем же "Invalid API key!" под кодом 200, мы всё равно распознаем это как
-// проблему ключа, а не как "тайтл не найден". Цена ошибки тут высокая:
-// прогон разметил бы pending всю библиотеку при полностью живых данных.
+// проблему ключа, а не как "тайтл не найден".
+// Прогон разметил бы pending всю библиотеку при полностью живых данных.
 func (p *OMDbProvider) get(ctx context.Context, key string, keyIndex int, params map[string]string) (*omdbResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, omdbURL, nil)
 	if err != nil {

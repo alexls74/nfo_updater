@@ -52,12 +52,6 @@ type tmdbFindResponse struct {
 // checkKey проверяет ключ через endpoint /authentication — он существует
 // ровно для этого и ничего не расходует: суточной квоты у TMDb нет,
 // ограничение только по частоте запросов с одного IP.
-//
-// Проверено живыми запросами: с v3-шным API Key в query-параметре endpoint
-// отвечает 200 и {"success":true}, с негодным ключом — 401. Заголовок
-// Authorization: Bearer, который показан в официальном примере, нужен
-// только для API Read Access Token (авторизация v4); мы пользуемся v3,
-// поэтому он неприменим.
 func (p *TMDbProvider) checkKey(ctx context.Context) error {
 	_, err := p.get(ctx, tmdbBaseURL+"/authentication")
 	return err

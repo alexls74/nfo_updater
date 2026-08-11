@@ -44,9 +44,7 @@ func askSystemPaths(p *Prompt, values map[string]string) error {
 		return nil
 	}
 
-	// Возврат к умолчанию отдельным вопросом: без него человек, однажды
-	// назначивший свой каталог, не смог бы вернуться иначе как правкой
-	// конфига руками.
+	// Возврат к умолчанию отдельным вопросом.
 	if !current.isDefault && defaultRoot != "" {
 		useDefault, err := p.YesNo("Go back to the default location ("+defaultRoot+")?", false)
 		if err != nil {

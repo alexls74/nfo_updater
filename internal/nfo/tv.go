@@ -22,7 +22,7 @@ var reRootTag = regexp.MustCompile(`(?s)^\s*(?:<\?xml[^>]*\?>\s*)?<(movie|tvshow
 
 // DetectFileType определяет тип файла по корневому тегу. Возвращает
 // FileTypeUnknown, если файл не похож ни на один из трёх известных типов
-// (например, season.nfo или что-то ещё не поддерживаемое нами).
+// (например, season.nfo или что-то ещё не поддерживаемое).
 func DetectFileType(content string) FileType {
 	m := reRootTag.FindStringSubmatch(content)
 	if m == nil {

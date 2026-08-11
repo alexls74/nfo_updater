@@ -69,8 +69,7 @@ func (s *RunStats) IncBackup()    { s.mu.Lock(); s.BackupsCreated++; s.mu.Unlock
 func (s *RunStats) IncDefaultOverridden() { s.mu.Lock(); s.DefaultOverridden++; s.mu.Unlock() }
 
 // UpdatedCount — сколько файлов реально изменено за прогон. По нему
-// решается, дёргать ли медиасерверы: если на диске ничего не поменялось,
-// просить сервер пересканировать библиотеку не за чем.
+// решается, дёргать ли медиасерверы.
 func (s *RunStats) UpdatedCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

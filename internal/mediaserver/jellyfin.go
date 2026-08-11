@@ -3,14 +3,10 @@ package mediaserver
 
 import "net/http"
 
-// Jellyfin — форк Emby, и на сегодня оба нужных нам эндпоинта у него те же,
-// поэтому работа делается общей реализацией embyLike (см. emby.go).
+// Jellyfin — форк Emby.
 // Различие ровно одно — схема авторизации.
 //
-// Файл заведён отдельно намеренно, хотя кода в нём почти нет: проекты
-// разошлись уже давно и продолжают расходиться, так что рано или поздно
-// Jellyfin потребует собственных запросов. Когда это случится, менять
-// придётся только этот файл, а Emby останется нетронутым.
+// Файл заведён отдельно намеренно.
 func NewJellyfin(rawURL, apiKey string, httpClient *http.Client) Server {
 	return &embyLike{
 		name:    "jellyfin",
@@ -18,7 +14,7 @@ func NewJellyfin(rawURL, apiKey string, httpClient *http.Client) Server {
 		apiKey:  apiKey,
 		// Заголовок Authorization — то, что документировано сейчас.
 		// X-Emby-Token Jellyfin тоже принимает, но это наследие
-		// совместимости, которое однажды уберут.
+		// совместимости, которое однажды могут убрать.
 		setAuth: func(req *http.Request, key string) {
 			req.Header.Set("Authorization", `MediaBrowser Token="`+key+`"`)
 		},

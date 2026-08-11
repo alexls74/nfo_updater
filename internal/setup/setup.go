@@ -59,8 +59,7 @@ type Result struct {
 // Run проводит человека по всем секциям и записывает конфиг.
 //
 // configPath передаётся готовым: путь по умолчанию вычисляет main.go, он же
-// разбирает случай неизвестного домашнего каталога. Мастеру остаётся
-// записать файл туда, куда сказано.
+// разбирает случай неизвестного домашнего каталога.
 func Run(ctx context.Context, configPath string) (Result, error) {
 	p, err := Open()
 	if err != nil {
@@ -70,10 +69,7 @@ func Run(ctx context.Context, configPath string) (Result, error) {
 
 	res, err := runSections(ctx, p, configPath)
 	if errors.Is(err, ErrAborted) {
-		// Прощание печатает мастер, и только он. Раньше о прерывании
-		// сообщали трое подряд — сам мастер молчал, зато main.go печатал
-		// текст ошибки, а установочный скрипт добавлял своё, — и человек
-		// получал две строки об одном и том же.
+		// Прощание печатает мастер, и только он.
 		p.Blank()
 		p.Text("Setup cancelled. Nothing has been changed.")
 	}

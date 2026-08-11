@@ -64,8 +64,7 @@ func checkPoolKeys(pool *keyPool, probe func(key string, index int) error) []Key
 
 // CheckKeys для OMDb: отдельного endpoint'а валидации у сервиса нет,
 // поэтому каждый ключ проверяется НАСТОЯЩИМ запросом по заведомо
-// существующему тайтлу. Стоит по одному запросу на ключ и честно
-// списывается с квоты — сервис обращение обслужил.
+// существующему тайтлу. Стоит по одному запросу на ключ.
 func (p *OMDbProvider) CheckKeys(ctx context.Context) []KeyStatus {
 	return checkPoolKeys(p.pool, func(key string, index int) error {
 		_, err := p.get(ctx, key, index, map[string]string{
@@ -124,10 +123,7 @@ const (
 type KeyCheck struct {
 	Verdict KeyVerdict
 
-	// Reason — короткая причина без имени сервиса и номера ключа: то и
-	// другое вызывающий уже знает и печатает сам. Раньше эти сведения
-	// дублировались, и строка выглядела как
-	// "MDBList key #1 was rejected: mdblist key #1: invalid key (http status 403)".
+	// Reason — короткая причина без имени сервиса и номера ключа.
 	Reason string
 
 	// Requests — сколько запросов суточной квоты израсходовала проверка.

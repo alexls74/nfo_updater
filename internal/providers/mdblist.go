@@ -12,7 +12,6 @@ import (
 )
 
 // mdblistBaseURL — реальный рабочий путь: https://api.mdblist.com/{provider}/{mediatype}/{id}/
-// (подтверждено живыми запросами, включая tvdb как provider).
 const mdblistBaseURL = "https://api.mdblist.com"
 
 type MDBListProvider struct {

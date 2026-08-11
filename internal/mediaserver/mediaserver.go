@@ -67,9 +67,7 @@ func FromConfig(cfg *config.Config, httpClient *http.Client) []Server {
 //
 // Ошибки НЕ возвращаются наверх намеренно. Рейтинги к этому моменту уже
 // записаны в файлы, и недоступный медиасервер ничего из сделанного не
-// отменяет: он подхватит изменения на своём плановом сканировании. Считать
-// прогон неудавшимся из-за выключенного на ночь Plex было бы неправдой —
-// поэтому сюда пишется предупреждение, а код возврата не меняется.
+// отменяет: он подхватит изменения на своём плановом сканировании.
 func RefreshAll(ctx context.Context, servers []Server, logger *logging.Logger) {
 	for _, s := range servers {
 		if err := s.Refresh(ctx); err != nil {
@@ -81,8 +79,7 @@ func RefreshAll(ctx context.Context, servers []Server, logger *logging.Logger) {
 }
 
 // CheckAll опрашивает серверы, ничего не запуская. Для --check-config
-// и для стартовой проверки прогона: лучше сказать про неверный токен сразу,
-// чем через час молчаливого бездействия.
+// и для стартовой проверки прогона.
 func CheckAll(ctx context.Context, servers []Server, logger *logging.Logger) {
 	for _, s := range servers {
 		if err := s.Ping(ctx); err != nil {
@@ -93,30 +90,13 @@ func CheckAll(ctx context.Context, servers []Server, logger *logging.Logger) {
 	}
 }
 
-// normalizeURL убирает хвостовой слэш, чтобы склейка с путём эндпоинта
+// normalizeURL убирает слэш, чтобы склейка с путём эндпоинта
 // не давала двойного: пользователь пишет адрес как ему привычнее.
 func normalizeURL(raw string) string {
 	return strings.TrimRight(strings.TrimSpace(raw), "/")
 }
 
 // requestError переводит ошибку транспорта в осмысленное сообщение.
-//
-// Понадобилось после разбора, стоившего вечера. В логе стояло
-// "emby: http://10.11.12.30:8096: Get \"...\": dial tcp 10.11.12.30:8096:
-// i/o timeout", и по этому тексту нельзя было понять главного: сбой
-// произошёл ДО отправки первого байта HTTP, то есть ни ключ, ни эндпоинт,
-// ни наш код к нему отношения не имеют. Адрес при этом открывался
-// в браузере — но браузер работал на другой машине, по другую сторону
-// сетевого туннеля, а бинарник в ту сеть не имел доступа вовсе.
-//
-// Поэтому сообщения тут построены вокруг одного вопроса: что именно
-// пользователю проверять. Сырой текст ошибки сохраняется только там, где
-// классифицировать не удалось, — во всех прочих случаях он ничего не
-// добавляет к адресу, который и так стоит в строке.
-// Unreachable — до сервера не дошли или он ответил невнятно. Про сам адрес
-// и про ключ это не говорит ничего: сервер может быть выключен на ночь.
-// Правильная реакция — принять введённое как есть и проверить ещё раз на
-// первом прогоне.
 type Unreachable struct{ msg string }
 
 func (e *Unreachable) Error() string { return e.msg }
@@ -193,7 +173,7 @@ func requestErrorText(target string, err error) string {
 	}
 
 	// Соединение установилось, а ответа не дождались: это уже про сервер,
-	// а не про сеть, и путать одно с другим не стоит.
+	// а не про сеть.
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return fmt.Sprintf("%s accepted the connection but did not answer in time", target)
@@ -218,9 +198,6 @@ func checkStatus(code int) error {
 	case code == http.StatusNotFound:
 		return &Rejected{msg: "endpoint not found (http status 404), check the server address"}
 	default:
-		// Пятисотые и прочая экзотика — не повод заставлять человека
-		// перенабирать заведомо правильный ключ: это сервер сейчас
-		// не в форме, а не ввод неверен.
 		return &Unreachable{msg: fmt.Sprintf("the server answered with an unexpected http status %d", code)}
 	}
 }
@@ -246,9 +223,7 @@ var reachPaths = map[string]string{
 //
 // Нужно затем, чтобы разделить два вопроса, которые Ping сваливает в один.
 // Мастер настройки спрашивает адрес и ключ по очереди, и человек, ошибившийся
-// в адресе, должен узнать об этом сразу — до того, как пойдёт искать ключ
-// в настройках сервера, и не получив потом предложение перенабрать заодно
-// и правильный ключ.
+// в адресе, должен узнать об этом сразу.
 func Reach(ctx context.Context, name, rawURL string, client *http.Client) error {
 	path, ok := reachPaths[strings.ToLower(name)]
 	if !ok {

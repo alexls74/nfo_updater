@@ -78,7 +78,7 @@ func processShowDir(ctx context.Context, deps *Deps, showDir, showNFOPath string
 		// в консоли одно слово "Killed" без всякого объяснения.
 		//
 		// Обход фильмов фильтровал по .nfo с самого начала (см. isNFO
-		// в processor.go); здесь фильтра просто не было.
+		// в processor.go).
 		if !isNFO(path) {
 			return nil
 		}
@@ -293,9 +293,7 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 		reason, persist := outcome.describe()
 		if outcome == fetchNoEpisodeID {
 			// Считается как «нет ID», а не как «ждём»: ждать тут нечего,
-			// чинится это правкой файла. Раньше такая серия попадала
-			// в строку сводки "pending", а "no id" оставалась нулём —
-			// то есть сводка указывала не туда же, куда и лог.
+			// чинится это правкой файла
 			deps.Stats.IncNoID()
 			deps.Logger.Event("[NO_ID] %s: %s", path, reason)
 		} else {
@@ -311,7 +309,7 @@ func processEpisodeFile(ctx context.Context, deps *Deps, path string, raw []byte
 	} else {
 		// На уровне серии существует только IMDb, но слияние всё равно
 		// нужно: в файле могут лежать записи, оставленные другим
-		// инструментом, и затирать их мы не вправе.
+		// инструментом.
 		fetched := []nfo.RatingEntry{{Source: "imdb", Value: value, Votes: votes}}
 		entries := nfo.MergeRatings(fetched, nfo.ParseRatingsBlock(newContent), enabledSources(deps.Config))
 		nfo.SetDefaultRating(entries, "imdb")
