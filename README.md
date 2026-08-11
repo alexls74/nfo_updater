@@ -129,7 +129,7 @@ sudo systemctl reload nfo_updater
 
 If a pass is running at that moment, the new configuration is applied as soon as it ends. A configuration that fails to parse is reported in the log and the old one stays in force.
 
-#### Usage
+### Usage
 
 #### As a service
 
