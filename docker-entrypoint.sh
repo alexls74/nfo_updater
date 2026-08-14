@@ -48,7 +48,16 @@ fail() {
     # is up. The loop could never succeed, because a new .env only reaches the
     # container when it is recreated. Standing still instead leaves the message
     # above as the last thing in the log, where it can be read.
-    exec sleep infinity
+    #
+    # The trap is not decoration. This shell is process 1, and process 1 is not
+    # subject to the default signal actions: the kernel delivers only what the
+    # process has explicitly asked for. Without a handler, SIGTERM would be
+    # discarded, and "docker compose down" would sit through the whole
+    # stop_grace_period — five minutes — before resorting to SIGKILL.
+    trap 'exit 0' TERM INT
+    sleep infinity &
+    wait $!
+    exit 0
 }
 
 # ------------------------------------------------------------------------------
