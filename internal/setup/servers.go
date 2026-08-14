@@ -87,7 +87,7 @@ func isYes(v string) bool {
 // Значения пишутся прямо в values. Выключенный сервер сохраняет свой адрес
 // и ключ: пригодятся, если его когда-нибудь включат обратно, а вреда
 // от них никакого — при ENABLED=no ни одна подсистема их не читает.
-func askServers(ctx context.Context, p *Prompt, values map[string]string, container bool) error {
+func askServers(ctx context.Context, p *Prompt, values map[string]string) error {
 	p.Section("MEDIA SERVERS")
 	p.Note("Optional. A media server rescans its library on its own schedule")
 	p.Note("anyway; configuring one here only makes new ratings appear sooner.")
@@ -112,7 +112,7 @@ func askServers(ctx context.Context, p *Prompt, values map[string]string, contai
 			continue
 		}
 
-		if err := askOneServer(ctx, p, values, sp, help, client, container); err != nil {
+		if err := askOneServer(ctx, p, values, sp, help, client); err != nil {
 			return err
 		}
 	}
@@ -133,9 +133,9 @@ func askServers(ctx context.Context, p *Prompt, values map[string]string, contai
 // трогает эндпоинт, отвечающий без авторизации, и потому говорит про адрес
 // и только про адрес.
 func askOneServer(ctx context.Context, p *Prompt, values map[string]string,
-	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client, container bool) error {
+	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client) error {
 
-	url, err := askServerURL(ctx, p, values, sp, help, client, container)
+	url, err := askServerURL(ctx, p, values, sp, help, client)
 	if err != nil {
 		return err
 	}
@@ -173,19 +173,10 @@ func askOneServer(ctx context.Context, p *Prompt, values map[string]string,
 // askServerURL спрашивает адрес и сразу проверяет, кто по нему стоит.
 // Пустой ответ означает отказ от этого сервера.
 func askServerURL(ctx context.Context, p *Prompt, values map[string]string,
-	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client,
-	container bool) (string, error) {
+	sp serverPrompt, help mediaserver.ServerHelp, client *http.Client) (string, error) {
 
-	// Оговорка про localhost нужна именно в контейнере и только там: сервер,
-	// стоящий на той же машине, доступен по её адресу в сети, а не по
-	// localhost, который внутри контейнера указывает на сам контейнер.
-	if container {
-		p.Note("The address must be reachable from inside this container. Note that")
-		p.Note("localhost here means the container itself, not the machine it runs on.")
-	} else {
-		p.Note("The address must be reachable from THIS machine, which is not")
-		p.Note("necessarily the one your browser runs on.")
-	}
+	p.Note("The address must be reachable from THIS machine, which is not")
+	p.Note("necessarily the one your browser runs on.")
 	p.Note("Leave it empty to skip %s after all.", help.Display)
 
 	question := help.Display + " address, including http:// or https://"

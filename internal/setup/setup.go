@@ -56,43 +56,18 @@ type Result struct {
 	KeyUsage map[string][]int
 }
 
-// Options — свойства окружения, от которых зависит ход диалога.
-//
-// Это НЕ конфигурация: ни одно поле не попадает в config.conf и не
-// переопределяет ничего из него. Здесь только то, что мастер обязан знать
-// о месте, в котором его запустили, чтобы не задавать вопросов, ответа на
-// которые в этом месте не существует.
-type Options struct {
-	// Container — мастер работает внутри нашего docker-образа.
-	//
-	// Меняет диалог в четырёх местах, и каждое — не косметика:
-	//   - расписание: образ запускается с -d, поэтому "работать только по
-	//     вашей команде" в контейнере невозможно, и вопрос об этом задавать
-	//     нельзя;
-	//   - размещение данных: раскладку задаёт образ, а ответ "другой каталог"
-	//     увёл бы базу и бэкапы мимо тома, откуда они исчезли бы при первом
-	//     же обновлении образа;
-	//   - пути медиатеки: они внутренние, а не хостовые;
-	//   - адрес медиасервера: localhost в контейнере — сам контейнер.
-	//
-	// Решение о том, контейнер это или нет, принимает вызывающий: значение
-	// приходит сюда готовым, чтобы в пакете не появилось второго места,
-	// читающего окружение.
-	Container bool
-}
-
 // Run проводит человека по всем секциям и записывает конфиг.
 //
 // configPath передаётся готовым: путь по умолчанию вычисляет main.go, он же
 // разбирает случай неизвестного домашнего каталога.
-func Run(ctx context.Context, configPath string, opts Options) (Result, error) {
+func Run(ctx context.Context, configPath string) (Result, error) {
 	p, err := Open()
 	if err != nil {
 		return Result{}, err
 	}
 	defer p.Close()
 
-	res, err := runSections(ctx, p, configPath, opts)
+	res, err := runSections(ctx, p, configPath)
 	if errors.Is(err, ErrAborted) {
 		// Прощание печатает мастер, и только он.
 		p.Blank()
@@ -101,7 +76,7 @@ func Run(ctx context.Context, configPath string, opts Options) (Result, error) {
 	return res, err
 }
 
-func runSections(ctx context.Context, p *Prompt, configPath string, opts Options) (Result, error) {
+func runSections(ctx context.Context, p *Prompt, configPath string) (Result, error) {
 	values, err := config.ExistingValues(configPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("read the existing configuration: %w", err)
@@ -125,35 +100,24 @@ func runSections(ctx context.Context, p *Prompt, configPath string, opts Options
 		p.Note("as defaults: press Enter to keep them.")
 	}
 
-	scheduled, err := askSchedule(p, values, reconfigure, opts.Container)
+	scheduled, err := askSchedule(p, values, reconfigure)
 	if err != nil {
 		return Result{}, err
 	}
-	// Scheduled — сигнал "заведи службу", и адресат у него один:
-	// установочный скрипт. В контейнере адресата нет — расписание
-	// отрабатывает сам процесс, запущенный образом с -d, — поэтому код
-	// возврата 10 оттуда не выходит никогда.
-	if opts.Container {
-		scheduled = false
-	}
-
-	// Размещение данных в контейнере задано образом, см. Options.Container.
-	if !opts.Container {
-		if err := askSystemPaths(p, values); err != nil {
-			return Result{}, err
-		}
-	}
-	if err := askBackups(p, values, opts.Container); err != nil {
+	if err := askSystemPaths(p, values); err != nil {
 		return Result{}, err
 	}
-	if err := askLibrary(p, values, opts.Container); err != nil {
+	if err := askBackups(p, values); err != nil {
+		return Result{}, err
+	}
+	if err := askLibrary(p, values); err != nil {
 		return Result{}, err
 	}
 	keyUsage, err := askKeys(ctx, p, values)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := askServers(ctx, p, values, opts.Container); err != nil {
+	if err := askServers(ctx, p, values); err != nil {
 		return Result{}, err
 	}
 
@@ -170,20 +134,8 @@ func runSections(ctx context.Context, p *Prompt, configPath string, opts Options
 // свойство системы, которым распоряжается установочный скрипт, а не конфиг.
 // Мастер спрашивает то, что действительно ложится в конфиг, а вывод про
 // службу делает вызывающий из ответа.
-//
-// В контейнере развилки нет вовсе: образ запускается с -d, и ответ "нет"
-// записал бы пустой SCHEDULE, который в режиме демона всё равно откатится
-// на DefaultDaemonSchedule. То есть вопрос, заданный там, отменял бы сам
-// себя. Остаётся только само выражение.
-func askSchedule(p *Prompt, values map[string]string, reconfigure, container bool) (bool, error) {
+func askSchedule(p *Prompt, values map[string]string, reconfigure bool) (bool, error) {
 	p.Section("HOW IT RUNS")
-
-	if container {
-		p.Note("NFO Updater updates the library on a schedule for as long as the")
-		p.Note("container is running.")
-		return askCron(p, values)
-	}
-
 	p.Note("NFO Updater can update the library on a schedule, in the background,")
 	p.Note("or only when you start it yourself.")
 
@@ -206,12 +158,6 @@ func askSchedule(p *Prompt, values map[string]string, reconfigure, container boo
 		return false, nil
 	}
 
-	return askCron(p, values)
-}
-
-// askCron спрашивает само cron-выражение. Вынесено отдельно, потому что
-// спрашивается одинаково в обоих режимах, а предшествующая развилка — нет.
-func askCron(p *Prompt, values map[string]string) (bool, error) {
 	p.Note("Five cron fields: minute hour day month weekday.")
 	p.Note("The default means 03:00 every Monday.")
 	for {
@@ -228,24 +174,14 @@ func askCron(p *Prompt, values map[string]string) (bool, error) {
 	}
 }
 
-// askBackups — вопрос о бэкапах.
+// askBackups — часть секции размещения данных, поэтому без своего заголовка.
 //
 // Спрашивается отдельно, хотя умолчание разумно, ровно по одной причине:
 // бэкап — единственный путь назад после CREW_ORDER_FIX, который переставляет
 // теги в уже существующих файлах. Человек, выключающий бэкапы, должен знать,
 // что именно он выключает.
-//
-// Своего заголовка у вопроса обычно нет: он продолжает секцию размещения
-// данных, где как раз и был назван каталог бэкапов. В контейнере той секции
-// нет, и вопрос остался бы вовсе без рубрики — поэтому там заголовок свой.
-// Каталог при этом не называется: он один раз показывается в сводке, и
-// повторять его посреди диалога незачем.
-func askBackups(p *Prompt, values map[string]string, container bool) error {
-	if container {
-		p.Section("BACKUPS")
-	} else {
-		p.Blank()
-	}
+func askBackups(p *Prompt, values map[string]string) error {
+	p.Blank()
 	p.Note("Before changing a file, NFO Updater can put the original into a zip")
 	p.Note("archive. This is the only way back: the tag reordering it performs")
 	p.Note("cannot be undone by turning the setting off again.")
@@ -263,19 +199,12 @@ func askBackups(p *Prompt, values map[string]string, container bool) error {
 }
 
 // askLibrary — секция путей медиатеки.
-func askLibrary(p *Prompt, values map[string]string, container bool) error {
+func askLibrary(p *Prompt, values map[string]string) error {
 	p.Section("MEDIA LIBRARY")
 	p.Note("Movies and TV shows must live in separate directory trees: neither")
 	p.Note("may contain the other. The category of every file, and its place")
 	p.Note("inside a backup archive, is decided by which tree it was found in.")
 	p.Note("At least one of the two is required.")
-	// Самая частая ошибка при настройке в контейнере: вписан путь хоста,
-	// которого внутри нет. Проверка его отвергнет, но без этой оговорки
-	// человек не поймёт, почему существующий у него каталог "не найден".
-	if container {
-		p.Note("These are paths inside the container, the way docker-compose.yml mounts")
-		p.Note("them.")
-	}
 
 	for {
 		var tvshows []string

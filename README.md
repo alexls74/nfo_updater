@@ -22,7 +22,9 @@ Keeps the ratings in your Kodi-style `.nfo` files up to date.
 
 ## Installation and configuration
 
-### Debian / Ubuntu
+NFO Updater can be installed natively or as a  [Docker container](#docker) .
+
+### Debian / Ubuntu (recomended)
 
 You will need a 64-bit x86 Linux machine, `curl` or `wget`, `tar`, `sha256sum`.<br>
 `Systemd` is needed only if you want the library updated on a schedule.
@@ -129,9 +131,9 @@ sudo systemctl reload nfo_updater
 
 If a pass is running at that moment, the new configuration is applied as soon as it ends. A configuration that fails to parse is reported in the log and the old one stays in force.
 
-### Usage
+#### Usage
 
-#### As a service
+**As a service**
 
 Installed with a schedule, NFO Updater runs as a systemd service and needs no attention.
 The commands you may still want:
@@ -146,7 +148,7 @@ sudo systemctl stop nfo_updater         # stop, waiting for a running pass to fi
 
 A pass in progress is never cut short: on stop the daemon finishes the file it is on, packs its backups and only then exits. systemd waits up to five minutes for this.
 
-#### One-shot
+**One-shot**
 
 Without a schedule — or whenever you want a pass right now — run it yourself:
 
@@ -179,12 +181,106 @@ It performs a single pass over the library and exits. Only one instance works at
 The **Configuration** can be redirected using the `--config` flag.<br>
 **Rating cache**, **Logs**, **Backups** can be replaced with custom paths in the configuration file.
 
+### Docker
+
+You will need a 64-bit x86 Linux machine with Docker Engine and the Compose plugin.
+
+Fetch the two files:
+
+```sh
+mkdir nfo_updater && cd nfo_updater
+wget -O docker-compose.yml https://raw.githubusercontent.com/alexls74/nfo_updater/main/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/alexls74/nfo_updater/main/.env
+chmod 600 .env
+```
+
+`.env` is the configuration.<br>The [API keys](#api-keys) must be filled in. The rest are optional.
+
+Your media library is not configured in `.env`. It is mounted in `docker-compose.yml`, and the paths on your machine go there:
+
+```yaml
+    volumes:
+      ...
+      - /mnt/media/movies:/movies
+      - /mnt/media/tvshows:/tvshows
+```
+
+Replace the left-hand side of each line with your own paths. The right-hand side is fixed — `/movies` and `/tvshows` are where NFO Updater looks.
+
+Several source directories per category are attached as subdirectories of the same mount point:
+
+```yaml
+      - /mnt/disk1/films:/movies/films
+      - /mnt/disk2/oldies:/movies/oldies
+      - /nas/serials:/tvshows/serials
+      - /mnt/disk2/anime:/tvshows/anime
+```
+
+They may sit on different disks and share nothing; the two mount points are what ties them together. The names you pick are yours, and everything below `/movies` and `/tvshows` is walked recursively. If you only have one of the two categories, delete the other line.
+> A wrong path on the left of a colon is not an error Docker can catch: it creates whatever is missing, and the mount then succeeds while pointing at an empty directory. NFO Updater warns about an empty mount point in the log, and refuses to start if neither category was mounted at all.
+
+Then start it:
+
+```sh
+docker compose up -d
+```
+
+That is the whole installation. The container stays resident and starts a pass on the schedule. Watch the first one with `docker compose logs -f`.
+
+#### Everyday commands
+
+| Command | What it does |
+| --- | --- |
+| `docker compose logs -f` | Follow along. |
+| `docker compose kill -s SIGUSR1 nfo_updater` | Start a pass right now, off schedule. |
+| `docker compose up -d` | Apply changes made to `.env`. |
+| `docker compose stop` | Stop, waiting for a running pass to finish. |
+| `docker compose pull && docker compose up -d` | Update to the current image. |
+
+A pass in progress is never cut short: on stop the daemon finishes the file it is on, packs its backups and only then exits. The Compose file allows five minutes for this.
+
+> Use `up -d` after editing `.env`, not `restart`. A container keeps the environment it was created with, so a restart would go on running the old settings. `up -d` recreates it, and does nothing at all when nothing has changed.
+
+#### Running a pass by hand
+
+There are two ways to make NFO Updater work outside its schedule, and they are not the same thing.
+
+```sh
+docker compose kill -s SIGUSR1 nfo_updater
+```
+
+tells the daemon already running in the container to start a pass now. Nothing is printed to your terminal — the pass reports itself into `docker compose logs`, exactly as a scheduled one does. This is the one to use normally.
+
+```sh
+docker exec -it nfo_updater nfo_updater
+```
+
+runs a separate, single pass and prints it to your terminal as it goes, which is useful the first time or when chasing a problem. Only one pass runs at a time: started while the daemon is in the middle of one, it says so and exits without touching anything.
+
+#### Where things live
+
+| What | On this machine | Inside the container |
+| --- | --- | --- |
+| Settings | `./.env` | — |
+| Rating cache | `./data/database.db` | `/data/database.db` |
+| Logs | `./data/logs/` | `/data/logs/` |
+| Backups | `./data/backups/` | `/data/backups/` |
+
+The configuration file NFO Updater actually reads is built from `.env` at every start and kept inside the container. There is nothing to edit there and nothing to keep.
+
+`data` is created on the first start, and belongs to `root` — the container does not drop privileges. Everything works as it is; `sudo chown -R "$USER" data` makes the backups easier to unpack should you ever need them.
+
+Two things differ from a normal installation, both because of the mount points:
+
+- **Paths inside a backup archive are the container's paths.** A file mounted at `/movies/films` is stored under that name, not under its path on your machine.
+- **A media server address must be reachable from inside the container.** `localhost` there is the container itself, so a server on this same machine is reached by that machine's address on the network.
+
 ## Roadmap
 
 - [x] Ratings: IMDb, TMDb, Rotten Tomatoes, Trakt, Metacritic.
 - [x] Fix legacy tags.
 - [x] Crew, cast reorder.
-- [ ] Docker support.
+- [x] Docker support.
 - [ ] i18n support.
 
 ## License

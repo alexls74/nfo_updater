@@ -7,9 +7,6 @@ services:
 
     # unless-stopped is the only policy that also brings the service back after
     # the host reboots, which matters for something that wakes up once a week.
-    # The cost is that an unusable configuration makes the container restart in
-    # a loop, logging the reason each time; fix the file and it starts on its
-    # own within a minute.
     restart: unless-stopped
 
     # A pass that is interrupted still packs the originals of the files it has
@@ -17,29 +14,40 @@ services:
     # library. The default grace period of 10 seconds would kill it halfway.
     stop_grace_period: 300s
 
-    # The container runs as this user, so the files it writes into ./config and
-    # ./data belong to you rather than to root. Set PUID and PGID in .env to
-    # the output of `id -u` and `id -g`.
-    user: "${PUID:-1000}:${PGID:-1000}"
-
-    environment:
-      # The schedule is evaluated in local time. Without this the container
-      # runs on UTC.
-      TZ: ${TZ:-Etc/UTC}
+    # Every setting lives in .env. Nothing has to be listed here, now or when a
+    # future release adds a setting.
+    env_file: .env
 
     volumes:
-      # Configuration. On the first start NFO Updater creates config.conf here
-      # if it is missing.
-      - ./config:/etc/nfo_updater
+      # Database, logs and backup archives. Created on first start.
+      - ./data:/data
 
-      # Database, logs and backup archives.
-      - ./data:/var/lib/nfo_updater
-
-      # The media library, mounted at the same path inside the container as it
-      # has on the host. That way the paths written into config.conf mean the
-      # same thing on both sides, and there is nothing to translate.
+      # ----------------------------------------------------------------------
+      # YOUR MEDIA LIBRARY
       #
-      # Delete the line for a category you do not have — an empty variable is
-      # not a valid mount.
-      - ${MOVIES_PATH}:${MOVIES_PATH}
-      - ${TVSHOWS_PATH}:${TVSHOWS_PATH}
+      # Replace the paths on the LEFT of each colon with your own. The right
+      # side is fixed: /movies and /tvshows are where NFO Updater looks, and
+      # changing them would leave it looking at nothing.
+      #
+      # Several source directories per category are attached as subdirectories
+      # of the same mount point. The names you pick are yours; NFO Updater
+      # walks everything below /movies and /tvshows recursively.
+      #
+      #   - /mnt/disk1/films:/movies/films
+      #   - /mnt/disk2/oldies:/movies/oldies
+      #   - /nas/serials:/tvshows/serials
+      #   - /mnt/disk2/anime:/tvshows/anime
+      #
+      # They may sit on different disks and have nothing in common — the two
+      # mount points are what ties them together.
+      #
+      # Only have one of the two categories? Delete the other line. Keeping it
+      # with a wrong or made-up path is worse than not having it: Docker
+      # creates whatever is missing on the host, and the mount then succeeds
+      # while pointing at an empty directory.
+      #
+      # Read-write is required. NFO Updater edits .nfo files in place; it
+      # creates no new files in the library and touches nothing else.
+      # ----------------------------------------------------------------------
+      - /mnt/media/movies:/movies
+      - /mnt/media/tvshows:/tvshows

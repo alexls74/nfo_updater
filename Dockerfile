@@ -44,27 +44,26 @@ LABEL org.opencontainers.image.licenses="MIT"
 #   zone named by TZ has to be resolvable.
 RUN apk add --no-cache ca-certificates tzdata
 
+# The generated configuration is written to the path NFO Updater looks at by
+# default, so that anything run with "docker exec" sees the same settings as
+# the daemon without being given --config.
+ENV XDG_CONFIG_HOME=/run
+
 COPY --from=build /out/nfo_updater /usr/local/bin/nfo_updater
+COPY --from=build /src/internal/config/config.conf /usr/share/nfo_updater/config.conf
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Where the configuration and the data live inside the container.
-#
-# NFO Updater appends its own name to an XDG directory, so these roots put the
-# configuration at /etc/nfo_updater/config.conf and the database, the logs and
-# the backups under /var/lib/nfo_updater. docker-compose.yml mounts host
-# directories onto exactly those two paths.
-ENV XDG_CONFIG_HOME=/etc \
-    XDG_DATA_HOME=/var/lib
+# The template comes straight out of the source tree, so it cannot drift from
+# the one a normal installation gets. The entrypoint fills it in from the
+# environment on every start; the result lives in /run and is never written to
+# a volume, which is why an edited .env can never be shadowed by a stale file.
 
-# Tells the setup wizard that it is running inside this image: the questions
-# about systemd and about where to keep the data have no answer here. It is
-# not configuration and overrides nothing in config.conf.
-ENV NFO_UPDATER_CONTAINER=1
+# /movies and /tvshows are deliberately NOT created here. Their absence is how
+# the entrypoint tells that a category was not mounted at all.
 
-# No VOLUME declarations on purpose: they would create anonymous volumes for
-# anyone who forgets a bind mount, and the data would then quietly disappear
-# with the container instead of failing visibly.
+# No VOLUME declarations either: they would create anonymous volumes for anyone
+# who forgets a bind mount, and the data would then quietly disappear with the
+# container instead of failing visibly.
 
-# The binary is the entrypoint, so "docker compose run --rm nfo_updater --setup"
-# replaces only the -d below and still reaches the program's own flags.
-ENTRYPOINT ["/usr/local/bin/nfo_updater"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["-d"]

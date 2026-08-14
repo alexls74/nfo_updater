@@ -33,25 +33,6 @@ import (
 // определить не удалось; этот случай разбирается в run().
 var defaultConfigPath = config.DefaultConfigPath()
 
-// containerEnvVar — переменная, которую выставляет НАШ docker-образ.
-//
-// Это не настройка: она не переопределяет ни одного параметра config.conf и
-// не является частью конфигурации вообще. Она сообщает единственный факт —
-// программа работает внутри образа, собранного нами, с известной раскладкой
-// томов (/config, /data) и с -d в CMD. Мастер настройки по этому факту
-// опускает вопросы, ответа на которые в контейнере не существует.
-//
-// Читается РОВНО ЗДЕСЬ и нигде больше. Если понадобится второе место —
-// значение передаётся туда аргументом, как в setup.Options. Иначе рядом
-// однажды заведётся NFO_UPDATER_OMDB_KEYS, и единственный источник истины
-// о конфигурации перестанет быть единственным.
-const containerEnvVar = "NFO_UPDATER_CONTAINER"
-
-// inContainer — выставлена ли containerEnvVar в непустое значение.
-func inContainer() bool {
-	return os.Getenv(containerEnvVar) != ""
-}
-
 func main() {
 	os.Exit(run())
 }
@@ -62,6 +43,7 @@ func run() int {
 		showInfo    bool
 		showVersion bool
 		checkConfig bool
+		validate    bool
 		setupMode   bool
 		printUnit   string
 		showHelp    bool
@@ -78,6 +60,14 @@ func run() int {
 	fs.BoolVar(&showVersion, "version", false, "")
 	// --check-config намеренно не документирован в -h: он служебный.
 	fs.BoolVar(&checkConfig, "check-config", false, "")
+	// --validate — тоже служебный и тоже вне -h. От --check-config отличается
+	// тем, что не ходит в сеть: только читает конфиг и проверяет его на
+	// связность. Заведён для точки входа docker-образа, которая обязана
+	// отличить негодную конфигурацию от рабочей ДО запуска демона, и делать
+	// это при каждом старте контейнера. Проверка ключа OMDb стоит одного
+	// настоящего запроса из суточной квоты, так что --check-config для этого
+	// не годится.
+	fs.BoolVar(&validate, "validate", false, "")
 	fs.BoolVar(&setupMode, "setup", false, "")
 	// --print-unit тоже не документирован в -h, и по той же причине.
 	//
@@ -114,7 +104,7 @@ func run() int {
 	// Режимы работы взаимоисключающи, и это проверяется явно, а не решается
 	// молчаливым приоритетом. "--setup -d" — не "настроить, а потом стать
 	// демоном".
-	if modes := requestedModes(daemonMode, showInfo, checkConfig, setupMode, printUnit); len(modes) > 1 {
+	if modes := requestedModes(daemonMode, showInfo, checkConfig, validate, setupMode, printUnit); len(modes) > 1 {
 		fmt.Fprintf(os.Stderr, "these flags cannot be combined: %s\n\n", strings.Join(modes, ", "))
 		usage(os.Stderr)
 		return exitcode.Error
@@ -194,6 +184,12 @@ func run() int {
 		return exitcode.Config
 	}
 
+	// До открытия базы: --validate не должен создавать файлов. Если конфиг
+	// негоден, сюда уже не дошли — ошибка напечатана выше.
+	if validate {
+		return doValidate(cfg, configPath)
+	}
+
 	database, err := db.Open(cfg.DatabasePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "database: %v\n", err)
@@ -223,13 +219,16 @@ func run() int {
 // "флаги несовместимы" и заставить перечитывать справку.
 //
 // -h и -V сюда не входят: они обработаны выше и до этой точки не доходят.
-func requestedModes(daemonMode, showInfo, checkConfig, setupMode bool, printUnit string) []string {
+func requestedModes(daemonMode, showInfo, checkConfig, validate, setupMode bool, printUnit string) []string {
 	var modes []string
 	if daemonMode {
 		modes = append(modes, "-d")
 	}
 	if showInfo {
 		modes = append(modes, "-v")
+	}
+	if validate {
+		modes = append(modes, "--validate")
 	}
 	if checkConfig {
 		modes = append(modes, "--check-config")
@@ -249,7 +248,7 @@ func requestedModes(daemonMode, showInfo, checkConfig, setupMode bool, printUnit
 // потому что установочный скрипт приходит по каналу и stdin бинарника — это
 // тело скрипта. Наружу отсюда уходит только код возврата.
 func doSetup(ctx context.Context, configPath string) int {
-	res, err := setup.Run(ctx, configPath, setup.Options{Container: inContainer()})
+	res, err := setup.Run(ctx, configPath)
 	if err != nil {
 		if errors.Is(err, setup.ErrAborted) {
 			// Осознанный отказ, а не поломка: на диске ничего не изменено.
@@ -385,6 +384,18 @@ func reportConfigError(configPath string, err error) {
 	if errors.Is(err, config.ErrMissingAPIKeys) {
 		fmt.Fprintf(os.Stderr, "\nWhere to get the keys:\n%s\n", providers.FormatKeyHelp("  "))
 	}
+}
+
+// doValidate — служебный режим --validate: конфиг прочитан и провалидирован,
+// больше не делается ничего. Ни сети, ни базы, ни обхода медиатеки.
+//
+// Существования каталогов медиатеки Load не проверяет — только абсолютность
+// путей и отсутствие вложенности. Тот, кто зовёт --validate, должен помнить,
+// что примонтированный, но пустой каталог отсюда выглядит нормальным.
+func doValidate(cfg *config.Config, configPath string) int {
+	fmt.Println(cfg.Describe(configPath))
+	fmt.Println("\nConfiguration is valid.")
+	return exitcode.OK
 }
 
 // doCheckConfig — служебный режим --check-config: конфиг уже прочитан и
