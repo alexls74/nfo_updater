@@ -81,9 +81,7 @@ require_tty() {
 # Проверки окружения
 # ---------------------------------------------------------------------------
 
-# Релиз собирается только под linux/amd64 (см. Makefile). Сказать об этом
-# сразу честнее, чем дать скачать архив и упасть на "cannot execute binary
-# file": на NAS с ARM это самый вероятный исход.
+# Релиз собирается только под linux/amd64 (см. Makefile).
 check_platform() {
 	[ "$(uname -s)" = 'Linux' ] || die "NFO Updater is built for Linux only"
 	case "$(uname -m)" in

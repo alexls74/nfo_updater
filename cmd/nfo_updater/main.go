@@ -33,6 +33,25 @@ import (
 // определить не удалось; этот случай разбирается в run().
 var defaultConfigPath = config.DefaultConfigPath()
 
+// containerEnvVar — переменная, которую выставляет НАШ docker-образ.
+//
+// Это не настройка: она не переопределяет ни одного параметра config.conf и
+// не является частью конфигурации вообще. Она сообщает единственный факт —
+// программа работает внутри образа, собранного нами, с известной раскладкой
+// томов (/config, /data) и с -d в CMD. Мастер настройки по этому факту
+// опускает вопросы, ответа на которые в контейнере не существует.
+//
+// Читается РОВНО ЗДЕСЬ и нигде больше. Если понадобится второе место —
+// значение передаётся туда аргументом, как в setup.Options. Иначе рядом
+// однажды заведётся NFO_UPDATER_OMDB_KEYS, и единственный источник истины
+// о конфигурации перестанет быть единственным.
+const containerEnvVar = "NFO_UPDATER_CONTAINER"
+
+// inContainer — выставлена ли containerEnvVar в непустое значение.
+func inContainer() bool {
+	return os.Getenv(containerEnvVar) != ""
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -230,7 +249,7 @@ func requestedModes(daemonMode, showInfo, checkConfig, setupMode bool, printUnit
 // потому что установочный скрипт приходит по каналу и stdin бинарника — это
 // тело скрипта. Наружу отсюда уходит только код возврата.
 func doSetup(ctx context.Context, configPath string) int {
-	res, err := setup.Run(ctx, configPath)
+	res, err := setup.Run(ctx, configPath, setup.Options{Container: inContainer()})
 	if err != nil {
 		if errors.Is(err, setup.ErrAborted) {
 			// Осознанный отказ, а не поломка: на диске ничего не изменено.

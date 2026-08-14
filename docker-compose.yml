@@ -1,0 +1,45 @@
+name: nfo_updater
+
+services:
+  nfo_updater:
+    image: ghcr.io/alexls74/nfo_updater:${IMAGE_TAG:-latest}
+    container_name: nfo_updater
+
+    # unless-stopped is the only policy that also brings the service back after
+    # the host reboots, which matters for something that wakes up once a week.
+    # The cost is that an unusable configuration makes the container restart in
+    # a loop, logging the reason each time; fix the file and it starts on its
+    # own within a minute.
+    restart: unless-stopped
+
+    # A pass that is interrupted still packs the originals of the files it has
+    # already rewritten into a backup archive, and that takes time on a large
+    # library. The default grace period of 10 seconds would kill it halfway.
+    stop_grace_period: 300s
+
+    # The container runs as this user, so the files it writes into ./config and
+    # ./data belong to you rather than to root. Set PUID and PGID in .env to
+    # the output of `id -u` and `id -g`.
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    environment:
+      # The schedule is evaluated in local time. Without this the container
+      # runs on UTC.
+      TZ: ${TZ:-Etc/UTC}
+
+    volumes:
+      # Configuration. On the first start NFO Updater creates config.conf here
+      # if it is missing.
+      - ./config:/etc/nfo_updater
+
+      # Database, logs and backup archives.
+      - ./data:/var/lib/nfo_updater
+
+      # The media library, mounted at the same path inside the container as it
+      # has on the host. That way the paths written into config.conf mean the
+      # same thing on both sides, and there is nothing to translate.
+      #
+      # Delete the line for a category you do not have — an empty variable is
+      # not a valid mount.
+      - ${MOVIES_PATH}:${MOVIES_PATH}
+      - ${TVSHOWS_PATH}:${TVSHOWS_PATH}
