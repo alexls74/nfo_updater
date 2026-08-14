@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"nfo_updater/internal/config"
@@ -202,7 +204,27 @@ func run() int {
 	bootLogger := logging.New(nil, os.Stdout, cfg.LogVerbose)
 	runner := processor.NewRunner(cfg, database, configPath, bootLogger)
 
-	ctx := context.Background()
+	// Перехват сигналов остановки общий для всех рабочих режимов, а не
+	// только для демона. Прогон, убитый сигналом по умолчанию, не выполняет
+	// отложенных вызовов: база остаётся незакрытой (а с ней на диске
+	// остаются -wal и -shm), лог прогона — недописанным, бэкап —
+	// неупакованным. Ручной прогон обрывают чаще, чем службу, так что
+	// защищать его надо тем более.
+	//
+	// Ставится ПОСЛЕ database.Close() в порядке регистрации, то есть
+	// отработает раньше него: сначала снимаем перехват, потом закрываем
+	// базу.
+	ctx, stopSignals := watchStopSignals(context.Background(), daemonMode, func(sig os.Signal) {
+		if daemonMode {
+			bootLogger.Event("[SHUTDOWN] received %s, stopping", sig)
+			return
+		}
+		// Перевод строки в начале — из-за эха "^C" в терминале.
+		// Про прерывание говорит только это сообщение: дальше прогон
+		// сам допишет [RUN_ABORTED] со сводкой, дублировать нечего.
+		fmt.Fprintf(os.Stderr, "\n%s received, finishing the current step and exiting...\n", sig)
+	})
+	defer stopSignals()
 
 	if checkConfig {
 		return doCheckConfig(ctx, cfg, configPath, runner)
@@ -424,6 +446,56 @@ func doCheckConfig(ctx context.Context, cfg *config.Config, configPath string, r
 	return exitcode.OK
 }
 
+// watchStopSignals возвращает контекст, отменяемый по сигналу остановки,
+// и функцию снятия перехвата.
+//
+// Набор сигналов зависит от режима. SIGTERM и SIGINT означают остановку
+// везде. SIGHUP добавляется только вне режима демона: у демона он занят
+// перезагрузкой конфига (см. daemon.Serve), а в одноразовом прогоне
+// перезагружать нечего, и приходит он обычно от закрытого терминала или
+// оборванной ssh-сессии — то есть означает ровно остановку.
+//
+// Второй сигнал завершает процесс немедленно. Прогон при отмене не
+// бросает работу мгновенно: он доупаковывает бэкапы уже изменённых файлов
+// и просит медиасервер пересканировать библиотеку, а это секунды или
+// десятки секунд. Человеку, который передумал ждать, нужен выход, и лучше
+// пусть это будет второй Ctrl+C, чем поиск PID в соседнем терминале.
+// Отложенные вызовы при таком выходе не отработают — это осознанная цена
+// явно повторённого требования. Службе это не грозит: systemd шлёт один
+// SIGTERM и ждёт TimeoutStopSec.
+func watchStopSignals(parent context.Context, daemonMode bool, onStop func(os.Signal)) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+
+	sigs := []os.Signal{syscall.SIGTERM, syscall.SIGINT}
+	if !daemonMode {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, sigs...)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Работа закончилась сама, перехват снят — горутина больше
+			// не нужна.
+			return
+		case sig := <-ch:
+			onStop(sig)
+			cancel()
+		}
+
+		<-ch
+		fmt.Fprintln(os.Stderr, "second stop signal received, exiting immediately")
+		os.Exit(exitcode.Error)
+	}()
+
+	return ctx, func() {
+		signal.Stop(ch)
+		cancel()
+	}
+}
+
 // doOneShot — обычный запуск без флагов: один прогон и выход.
 func doOneShot(ctx context.Context, runner *processor.Runner) int {
 	if err := runner.Run(ctx); err != nil {
@@ -501,9 +573,13 @@ func doDaemon(ctx context.Context, cfg *config.Config, configPath string, databa
 
 	err := d.Serve(ctx)
 
-	// Serve возвращается после SIGTERM/SIGINT. Отменяем контекст, чтобы
-	// остановить цикл расписания и прогон, если он в этот момент идёт,
-	// и дожидаемся их завершения — прогон при отмене всё равно упакует
+	// Serve возвращается, когда отменён ctx, то есть после сигнала
+	// остановки (его перехватывает watchStopSignals выше) — и уже дождавшись
+	// внеплановых прогонов, запущенных им по SIGUSR1.
+	//
+	// cancel() здесь всё равно нужен: Serve может вернуться и с ошибкой,
+	// при живом контексте. Дальше ждём цикл расписания вместе с прогоном,
+	// если тот идёт прямо сейчас: при отмене прогон всё равно упакует
 	// бэкапы уже изменённых файлов, обрывать его на полуслове нельзя.
 	cancel()
 	wg.Wait()

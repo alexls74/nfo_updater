@@ -4,8 +4,10 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // чистый Go-драйвер SQLite, без cgo
@@ -83,6 +85,13 @@ func MediaKey(imdbID, tmdbID, tvdbID string) (string, error) {
 	return "", fmt.Errorf("imdb_id, tmdb_id and tvdb_id are all empty")
 }
 
+// busyTimeout — сколько соединение ждёт освобождения базы, прежде чем
+// вернуть SQLITE_BUSY. Конкуренции внутри процесса нет (обход медиатеки
+// последовательный, пул сведён к одному соединению), так что ожидание
+// возможно только против внешнего писателя: демона, работающего рядом
+// с ручным прогоном, или второго экземпляра до захвата flock.
+const busyTimeout = 5 * time.Second
+
 // Open открывает файл БД, при необходимости заводя каталог под него.
 func Open(path string) (*DB, error) {
 	dir := filepath.Dir(path)
@@ -90,21 +99,43 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("create database dir %s: %w", dir, err)
 	}
 
-	sqlDB, err := sql.Open("sqlite", path)
+	dsn, err := buildDSN(path)
+	if err != nil {
+		return nil, err
+	}
+
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database %s: %w", path, err)
 	}
 
-	// sql.Open соединения не открывает — оно заводится первым
-	// запросом. Поэтому все проблемы с самим файлом всплывают здесь,
-	// на первой же PRAGMA, а не строкой выше. Отсюда и путь в сообщениях.
-	if _, err := sqlDB.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
+	// Пул сводится к одному соединению намеренно, и причин две.
+	//
+	// Первая: busy_timeout — настройка СОЕДИНЕНИЯ, а не файла базы, в
+	// отличие от journal_mode. Пул из нескольких соединений означал бы,
+	// что часть из них живёт со значением по умолчанию (нулём) и падает
+	// с "database is locked" при первой же конкуренции за запись.
+	//
+	// Вторая: сериализация здесь бесплатна. Параллельных обращений к базе
+	// в программе нет — обход медиатеки последовательный, единственная
+	// горутина в дереве обрабатывает сигналы. Очереди за соединением
+	// не образуется, а модель поведения становится тривиальной.
+	//
+	// Взаимоблокировки, которой ограниченный пул опасен, здесь быть
+	// не может: наружу *sql.Rows не отдаётся ни одним методом (курсоры
+	// живут и закрываются внутри GetRatings и ListPending), а
+	// единственная транзакция — в migrate — работает только через tx
+	// и к d.sql изнутри себя не обращается. Оба инварианта надо
+	// сохранять при правках, иначе программа встанет намертво.
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+
+	// sql.Open соединения не открывает — оно заводится первым запросом.
+	// Поэтому все проблемы с самим файлом всплывают здесь, на прагмах,
+	// а не строкой выше. Отсюда и путь в сообщениях.
+	if err := ensurePragmas(sqlDB); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("set journal_mode on %s: %w", path, err)
-	}
-	if _, err := sqlDB.Exec(`PRAGMA busy_timeout=5000;`); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("set busy_timeout on %s: %w", path, err)
+		return nil, fmt.Errorf("%w on %s", err, path)
 	}
 
 	d := &DB{sql: sqlDB}
@@ -113,6 +144,93 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("migrate database %s: %w", path, err)
 	}
 	return d, nil
+}
+
+// buildDSN собирает file:-URI с прагмами в параметрах.
+//
+// Прагмы задаются здесь, а не отдельными Exec после открытия, потому что
+// драйвер применяет их к КАЖДОМУ новому соединению пула. Exec применил бы
+// их к одному произвольному соединению, взятому из пула на время запроса,
+// и любое заведённое позже — например, взамен закрытого после ошибки —
+// пришло бы с умолчаниями.
+//
+// Путь приводится к абсолютному до сборки URI: относительный "data/db.sqlite"
+// в форме file://data/db.sqlite означал бы хост "data", а не каталог.
+func buildDSN(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve database path %s: %w", path, err)
+	}
+
+	q := url.Values{}
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeout.Milliseconds()))
+
+	u := url.URL{Scheme: "file", Path: abs, RawQuery: q.Encode()}
+	return u.String(), nil
+}
+
+// ensurePragmas убеждается, что прагмы из DSN действительно применились,
+// и доводит их до нужных значений, если нет.
+//
+// Проверка не паранойя: синтаксис параметра _pragma — договорённость
+// конкретного драйвера, а не часть SQLite. Смена драйвера или его версии
+// может тихо оставить настройки на умолчаниях, и без этой проверки такое
+// выяснилось бы однажды ночью как "database is locked" в логе прогона.
+// Здесь же оно либо чинится на месте, либо становится внятной ошибкой
+// старта.
+func ensurePragmas(sqlDB *sql.DB) error {
+	mode, err := pragmaString(sqlDB, "journal_mode")
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(mode, "wal") {
+		// journal_mode хранится в заголовке файла базы и действует для
+		// всех соединений, так что один Exec тут исчерпывающ.
+		if _, err := sqlDB.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			return fmt.Errorf("set journal_mode: %w", err)
+		}
+		if mode, err = pragmaString(sqlDB, "journal_mode"); err != nil {
+			return err
+		}
+		if !strings.EqualFold(mode, "wal") {
+			return fmt.Errorf("journal_mode stayed %q instead of wal", mode)
+		}
+	}
+
+	want := busyTimeout.Milliseconds()
+	got, err := pragmaInt(sqlDB, "busy_timeout")
+	if err != nil {
+		return err
+	}
+	if int64(got) != want {
+		if _, err := sqlDB.Exec(fmt.Sprintf(`PRAGMA busy_timeout=%d`, want)); err != nil {
+			return fmt.Errorf("set busy_timeout: %w", err)
+		}
+		if got, err = pragmaInt(sqlDB, "busy_timeout"); err != nil {
+			return err
+		}
+		if int64(got) != want {
+			return fmt.Errorf("busy_timeout stayed %d instead of %d", got, want)
+		}
+	}
+	return nil
+}
+
+func pragmaString(sqlDB *sql.DB, name string) (string, error) {
+	var v string
+	if err := sqlDB.QueryRow(`PRAGMA ` + name).Scan(&v); err != nil {
+		return "", fmt.Errorf("read %s: %w", name, err)
+	}
+	return v, nil
+}
+
+func pragmaInt(sqlDB *sql.DB, name string) (int, error) {
+	var v int
+	if err := sqlDB.QueryRow(`PRAGMA ` + name).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read %s: %w", name, err)
+	}
+	return v, nil
 }
 
 func (d *DB) Close() error {
