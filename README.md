@@ -2,7 +2,7 @@
 
 # NFO Updater
 
-Keeps the ratings in your Kodi-style `.nfo` files up to date.
+Keeps the ratings in Kodi-style NFO files up to date.
 
 ## Features
 
