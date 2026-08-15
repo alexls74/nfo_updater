@@ -1,3 +1,5 @@
+🇺🇸 English | 🇷🇺 [Русский](README.ru.md) 
+
 # NFO Updater
 
 Keeps the ratings in your Kodi-style `.nfo` files up to date.
