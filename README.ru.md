@@ -23,7 +23,7 @@
 
 ## Установка и настройка
 
-NFO Updater ставится на систему Linux или как [Docker-контейнер](#docker).
+NFO Updater может быть установлен на систему Linux или как [Docker-контейнер](#docker).
 
 ### Debian / Ubuntu (рекомендуется)
 
