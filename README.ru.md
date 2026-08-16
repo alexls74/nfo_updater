@@ -184,7 +184,7 @@ nfo_updater
 
 ### Docker
 
-Понадобится 64-битная x86 Linux OS, Docker Engine и плагином Compose.
+Понадобится 64-битная x86 Linux OS, Docker Engine с плагином Compose.
 
 Скачайте два файла:
 
