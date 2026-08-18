@@ -34,17 +34,31 @@ func DetectActorIndent(content string) string {
 // FixLegacyUniqueIDs добавляет современные <uniqueid type="imdb">/<uniqueid
 // type="tmdb"> для уже известных ID, но только если такого <uniqueid> ещё
 // нет. Устаревшие теги не удаляются.
+//
+// Атрибут default="true" проставляется только тогда, когда в файле нет
+// ни одного <uniqueid> с ним. Чужой default не снимаем и не переносим:
+// правки аддитивны, а два default сразу сделали бы файл неоднозначным для
+// медиасервера. Типичный случай — tvshow.nfo, где рядом с легаси <imdbid>
+// стоит <uniqueid type="tvdb" default="true">, а современного
+// <uniqueid type="imdb"> нет вовсе.
+//
+// Проверка идёт по текущему content, поэтому вставки видят друг друга:
+// imdb, добавленный с default, не даст поставить тот же атрибут и tmdb.
 func FixLegacyUniqueIDs(content, imdbID, tmdbID string) (updated string, changed bool) {
 	indent := DetectIndent(content)
 
 	if imdbID != "" && !HasUniqueID(content, "imdb") {
-		tag := indent + `<uniqueid type="imdb" default="true">` + imdbID + `</uniqueid>`
+		defaultAttr := ""
+		if !HasDefaultUniqueID(content) {
+			defaultAttr = ` default="true"`
+		}
+		tag := indent + `<uniqueid type="imdb"` + defaultAttr + `>` + imdbID + `</uniqueid>`
 		content = insertAfterAnchor(content, tag)
 		changed = true
 	}
 	if tmdbID != "" && !HasUniqueID(content, "tmdb") {
 		defaultAttr := ""
-		if imdbID == "" {
+		if imdbID == "" && !HasDefaultUniqueID(content) {
 			defaultAttr = ` default="true"`
 		}
 		tag := indent + `<uniqueid type="tmdb"` + defaultAttr + `>` + tmdbID + `</uniqueid>`

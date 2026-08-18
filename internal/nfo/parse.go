@@ -12,6 +12,8 @@ var (
 	reUniqueIDImdb = regexp.MustCompile(`<uniqueid[^>]*type="imdb"[^>]*>(tt\d{7,9})</uniqueid>`)
 	reUniqueIDTmdb = regexp.MustCompile(`<uniqueid[^>]*type="tmdb"[^>]*>(\d+)</uniqueid>`)
 
+	reUniqueIDDefault = regexp.MustCompile(`(?i)<uniqueid\b[^>]*\bdefault\s*=\s*"true"[^>]*>`)
+
 	reLegacyID     = regexp.MustCompile(`<id>([^<]*)</id>`)
 	reLegacyTmdbID = regexp.MustCompile(`<tmdbid>(\d+)</tmdbid>`)
 
@@ -52,6 +54,13 @@ func ParseIDs(content string) (imdbID, tmdbID string) {
 		tmdbID = m[1]
 	}
 	return imdbID, tmdbID
+}
+
+// HasDefaultUniqueID проверяет, есть ли в файле хоть один <uniqueid>
+// с атрибутом default="true", независимо от его type. Нужна перед
+// простановкой этого атрибута: двух default в файле быть не должно.
+func HasDefaultUniqueID(content string) bool {
+	return reUniqueIDDefault.MatchString(content)
 }
 
 // HasUniqueID проверяет, есть ли уже <uniqueid type="idType">.

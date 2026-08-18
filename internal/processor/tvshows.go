@@ -114,8 +114,21 @@ func processShowDir(ctx context.Context, deps *Deps, showDir, showNFOPath string
 //
 // Отсутствие прав на сам tvshow.nfo не отменяет обработку серий: ids
 // и таблица рейтингов серий возвращаются как обычно, поэтому серии внутри
-// этой папки будут обработаны, если их файлы записываемы.
+// этой папки будут обработаны, если их файлы записываемы. Так же ведёт себя
+// и превышение maxNFOSize.
 func processShowNFO(ctx context.Context, deps *Deps, path string) (providers.IDs, map[string]providers.EpisodeRating, error) {
+	// Третий путь чтения .nfo в проекте, и потолок размера нужен здесь
+	// ровно по той же причине, что в movies.go и в обходе серий выше:
+	// под именем tvshow.nfo может оказаться что угодно, а втягивать это
+	// в память целиком незачем. Ошибку не возвращаем — обход серий должен
+	// продолжиться, как он продолжается при [NO_ID] и [NO_ACCESS].
+	if info, err := os.Stat(path); err == nil && info.Size() > maxNFOSize {
+		deps.Stats.IncError()
+		deps.Logger.Event("[ERROR] %s: %d bytes is far too large for an NFO file, skipped",
+			path, info.Size())
+		return providers.IDs{}, nil, nil
+	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		deps.Stats.IncError()

@@ -6,3 +6,6 @@ nfo_updater.code-workspace
 Makefile
 test
 CHANGELOG.md
+CLAUDE.md
+.claude
+CLAUDE.local.md
