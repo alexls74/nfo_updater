@@ -224,7 +224,7 @@ func (p *MDBListProvider) getWithRetry(ctx context.Context, url string) (*mdblis
 func (p *MDBListProvider) doGet(ctx context.Context, url, key string, keyIndex int) (*mdblistResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), keyIndex, NetTransport, err)
 	}
 	q := req.URL.Query()
 	q.Set("apikey", key)
@@ -234,7 +234,7 @@ func (p *MDBListProvider) doGet(ctx context.Context, url, key string, keyIndex i
 	resp, err := p.http.Do(req)
 	if err != nil {
 		// До сервиса не дошли — запрос не потрачен.
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), keyIndex, NetTransport, err)
 	}
 	defer resp.Body.Close()
 
@@ -262,16 +262,16 @@ func (p *MDBListProvider) doGet(ctx context.Context, url, key string, keyIndex i
 		p.pool.noteRequest(keyIndex)
 		return nil, ErrNotFound
 	case resp.StatusCode >= 500:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), keyIndex, NetServerFault, fmt.Errorf("http status %d", resp.StatusCode))
 	case resp.StatusCode != http.StatusOK:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("unexpected http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), keyIndex, NetBadResponse, fmt.Errorf("unexpected http status %d", resp.StatusCode))
 	}
 
 	p.pool.noteRequest(keyIndex)
 
 	var data mdblistResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("decode response: %w", err)}
+		return nil, newNetworkError(p.Name(), keyIndex, NetBadResponse, fmt.Errorf("decode response: %w", err))
 	}
 	return &data, nil
 }

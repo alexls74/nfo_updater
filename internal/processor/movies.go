@@ -388,12 +388,16 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 			continue
 		}
 
-		res, err := p.FetchRatings(ctx, ids, mediaType)
+		var res providers.FetchResult
+		err := callProvider(deps, p.Name(), ids, func() error {
+			var e error
+			res, e = p.FetchRatings(ctx, ids, mediaType)
+			return e
+		})
 		switch {
 		case err == nil:
 			answered = true
-			deps.Breaker.RecordSuccess(p.Name())
-			deps.Stats.IncProviderRequest(p.Name())
+			providerAnswered(deps, p.Name())
 			for source, v := range res {
 				if wanted[source] && combined[source].Value == "" {
 					combined[source] = v
@@ -404,15 +408,13 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 			// Сервис прямо сказал: тайтла с таким ID у него нет.
 			answered = true
 			sawNotFound = true
-			deps.Breaker.RecordSuccess(p.Name())
-			deps.Stats.IncProviderRequest(p.Name())
+			providerAnswered(deps, p.Name())
 		case err == providers.ErrNoRatings:
 			// Тайтл есть, оценок к нему нет. Ответ такой же полноценный,
 			// как значение, — для breaker'а и счётчика это успех.
 			answered = true
 			sawNoRatings = true
-			deps.Breaker.RecordSuccess(p.Name())
-			deps.Stats.IncProviderRequest(p.Name())
+			providerAnswered(deps, p.Name())
 		case err == providers.ErrQuotaExhausted:
 			conclusive = false
 			if !deps.quotaWarned[p.Name()] {
@@ -422,22 +424,11 @@ func fetchRatingsWithFallback(ctx context.Context, deps *Deps, ids providers.IDs
 		case err == providers.ErrUnsupportedID:
 			// этот провайдер просто не годится для данной комбинации ID, не сбой
 		case providers.IsNetworkError(err):
+			// Повторы, запись в лог, circuit breaker и счётчик неудач —
+			// всё внутри callProvider. Здесь остаётся только пометить
+			// опрос как безрезультатный, чтобы временный сбой не был
+			// записан в кэш как "рейтинга не существует".
 			conclusive = false
-			// Текст ошибки пишем ВСЕГДА и на уровне Event. Раньше здесь
-			// не было ни одной записи, и молчаливый переход на следующего
-			// провайдера выглядел в логе как нормальная работа: узнать
-			// о сбое можно было только по счётчику запросов в сводке,
-			// а причину — вообще никак, она нигде не сохранялась.
-			//
-			// Утопить лог это не может: после пяти отказов подряд circuit
-			// breaker гасит провайдера, Allowed() возвращает false, и до
-			// конца прогона запросов к нему больше не делается.
-			deps.Logger.Event("[PROVIDER_ERROR] %s (%s): %v", p.Name(), idsLabel(ids), err)
-			tripped := deps.Breaker.RecordNetworkFailure(p.Name())
-			if tripped {
-				deps.Logger.Event("[PROVIDER_DOWN] %s: tripped after repeated network failures, disabled for the rest of this run", p.Name())
-			}
-			time.Sleep(deps.Breaker.Backoff())
 		}
 	}
 

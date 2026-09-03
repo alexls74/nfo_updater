@@ -137,7 +137,7 @@ func (p *OMDbProvider) fetchWithKey(ctx context.Context, key string, keyIndex in
 func (p *OMDbProvider) get(ctx context.Context, key string, keyIndex int, params map[string]string) (*omdbResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, omdbURL, nil)
 	if err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), keyIndex, NetTransport, err)
 	}
 	q := req.URL.Query()
 	q.Set("apikey", key)
@@ -149,13 +149,13 @@ func (p *OMDbProvider) get(ctx context.Context, key string, keyIndex int, params
 	resp, err := p.http.Do(req)
 	if err != nil {
 		// До сервиса не дошли — запрос не потрачен.
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), keyIndex, NetTransport, err)
 	}
 	defer resp.Body.Close()
 
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("read response: %w", readErr)}
+		return nil, newNetworkError(p.Name(), keyIndex, NetTransport, fmt.Errorf("read response: %w", readErr))
 	}
 
 	var data omdbResponse
@@ -185,16 +185,16 @@ func (p *OMDbProvider) get(ctx context.Context, key string, keyIndex int, params
 			Detail:   data.Error,
 		}
 	case resp.StatusCode >= 500:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), keyIndex, NetServerFault, fmt.Errorf("http status %d", resp.StatusCode))
 	case resp.StatusCode != http.StatusOK:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("unexpected http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), keyIndex, NetBadResponse, fmt.Errorf("unexpected http status %d", resp.StatusCode))
 	}
 
 	// Сюда дошли только при 200 без ошибки ключа: сервис обслужил запрос.
 	p.pool.noteRequest(keyIndex)
 
 	if data.Response == "" {
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("malformed response body")}
+		return nil, newNetworkError(p.Name(), keyIndex, NetBadResponse, fmt.Errorf("malformed response body"))
 	}
 	if data.Response != "True" {
 		// Обычное "Movie not found!" — тайтла нет, ключ в порядке.

@@ -135,7 +135,8 @@ func NewDeps(cfg *config.Config, database *db.DB, logger *logging.Logger, httpCl
 		TMDb:      tmdb,
 		Breaker: providers.NewCircuitBreaker(
 			cfg.CircuitBreakerFailures,
-			time.Duration(cfg.CircuitBreakerBackoffSeconds)*time.Second),
+			time.Duration(cfg.CircuitBreakerBackoffSeconds)*time.Second,
+			breakerProbeAfter),
 		Logger:      logger,
 		Stats:       NewRunStats(),
 		quotaWarned: make(map[string]bool),
@@ -379,10 +380,13 @@ func checkKeys(ctx context.Context, deps *Deps) error {
 			usableByProvider[st.Provider]++
 			continue
 		}
-		if providers.IsNetworkError(st.Err) {
+		if ne, ok := providers.AsNetworkError(st.Err); ok {
 			networkFailures++
+			// Печатается ne.Err, а не st.Err: провайдер и номер ключа
+			// уже стоят в начале строки, а текст NetworkError содержит
+			// их же — вышло бы трижды об одном.
 			deps.Logger.Event("[KEY_CHECK] %s key #%d: service did not respond: %v",
-				st.Provider, st.KeyIndex+1, st.Err)
+				st.Provider, st.KeyIndex+1, ne.Err)
 			continue
 		}
 		// Сюда попадают ошибки уровня ключа. Текст KeyError уже содержит

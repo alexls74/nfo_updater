@@ -111,7 +111,7 @@ func (p *TMDbProvider) findByExternalID(ctx context.Context, source, id, mediaPa
 	}
 	var data tmdbFindResponse
 	if err := json.Unmarshal(body, &data); err != nil {
-		return tmdbTitleResponse{}, false, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("decode find response: %w", err)}
+		return tmdbTitleResponse{}, false, newNetworkError(p.Name(), 0, NetBadResponse, fmt.Errorf("decode find response: %w", err))
 	}
 	if mediaPath == "tv" && len(data.TVResults) > 0 {
 		return data.TVResults[0], true, nil
@@ -141,7 +141,7 @@ func (p *TMDbProvider) doRequest(ctx context.Context, url string) (tmdbTitleResp
 	}
 	var t tmdbTitleResponse
 	if err := json.Unmarshal(body, &t); err != nil {
-		return tmdbTitleResponse{}, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("decode response: %w", err)}
+		return tmdbTitleResponse{}, newNetworkError(p.Name(), 0, NetBadResponse, fmt.Errorf("decode response: %w", err))
 	}
 	return t, nil
 }
@@ -155,11 +155,11 @@ func (p *TMDbProvider) get(ctx context.Context, url string) ([]byte, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), 0, NetTransport, err)
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), 0, NetTransport, err)
 	}
 	defer resp.Body.Close()
 
@@ -179,11 +179,11 @@ func (p *TMDbProvider) get(ctx context.Context, url string) ([]byte, error) {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		// А вот 429 у TMDb — это мгновенный троттлинг по частоте, а не
 		// суточный лимит. Ключ ни в чём не виноват, лечится повтором.
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("rate limited, http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), 0, NetServerFault, fmt.Errorf("rate limited, http status %d", resp.StatusCode))
 	case resp.StatusCode >= 500:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), 0, NetServerFault, fmt.Errorf("http status %d", resp.StatusCode))
 	case resp.StatusCode != http.StatusOK:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("unexpected http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), 0, NetBadResponse, fmt.Errorf("unexpected http status %d", resp.StatusCode))
 	}
 
 	return io.ReadAll(resp.Body)
@@ -240,7 +240,7 @@ func (p *TMDbProvider) FetchReleaseDate(ctx context.Context, ids IDs, mediaType 
 		FirstAirDate string `json:"first_air_date"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
-		return "", &NetworkError{Provider: p.Name(), Err: fmt.Errorf("decode release date: %w", err)}
+		return "", newNetworkError(p.Name(), 0, NetBadResponse, fmt.Errorf("decode release date: %w", err))
 	}
 	if mediaPath == "tv" {
 		if data.FirstAirDate == "" {

@@ -44,12 +44,24 @@ type RunStats struct {
 	DefaultOverridden int
 
 	providerRequests map[string]int
+
+	// providerFailures — сколько ТАЙТЛОВ каждый провайдер не смог
+	// обслужить из-за сетевого сбоя. Считается по тайтлам, а не по
+	// попыткам, ровно как в circuit breaker.
+	//
+	// Строка в сводке нужна потому, что без неё прогон с сетевыми
+	// сбоями выглядит идеально чистым: Errors считает сбои на файлах
+	// и на провайдерские не реагирует, а тайтл, оставшийся без свежих
+	// данных, молча берёт значение из кэша. Человек читает блок SUMMARY
+	// и делает вывод, что всё прошло гладко.
+	providerFailures map[string]int
 }
 
 func NewRunStats() *RunStats {
 	return &RunStats{
 		StartedAt:        time.Now(),
 		providerRequests: make(map[string]int),
+		providerFailures: make(map[string]int),
 	}
 }
 
@@ -82,6 +94,12 @@ func (s *RunStats) IncProviderRequest(provider string) {
 	s.providerRequests[provider]++
 }
 
+func (s *RunStats) IncProviderFailure(provider string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerFailures[provider]++
+}
+
 func (s *RunStats) Finish() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,9 +130,18 @@ func statLine(b *strings.Builder, label string, value int) {
 // sortedProviders — имена провайдеров по алфавиту. Map в Go отдаёт ключи
 // в случайном порядке, и строки отчёта прыгали бы между прогонами, мешая
 // сравнивать логи. Вызывать при взятом мьютексе.
+// Объединяет обе карты: провайдер, у которого все обращения кончились
+// сбоем, в providerRequests не попадёт вовсе, а показать его надо.
 func (s *RunStats) sortedProviders() []string {
-	names := make([]string, 0, len(s.providerRequests))
+	seen := make(map[string]bool, len(s.providerRequests)+len(s.providerFailures))
 	for provider := range s.providerRequests {
+		seen[provider] = true
+	}
+	for provider := range s.providerFailures {
+		seen[provider] = true
+	}
+	names := make([]string, 0, len(seen))
+	for provider := range seen {
 		names = append(names, provider)
 	}
 	sort.Strings(names)
@@ -167,6 +194,11 @@ func (s *RunStats) Summary() string {
 	b.WriteString("Providers\n")
 	for _, provider := range s.sortedProviders() {
 		statLine(&b, provider+" requests", s.providerRequests[provider])
+		// Строка о неудачах появляется только когда они были: в обычном
+		// прогоне сводке незачем пухнуть нулями.
+		if n := s.providerFailures[provider]; n > 0 {
+			statLine(&b, provider+" failures", n)
+		}
 	}
 	statLine(&b, "served from cache", s.FromCache)
 	b.WriteString("\n")
@@ -194,6 +226,9 @@ func (s *RunStats) SummaryLine() string {
 	fmt.Fprintf(&b, " cache=%d", s.FromCache)
 	for _, provider := range s.sortedProviders() {
 		fmt.Fprintf(&b, " %s=%d", provider, s.providerRequests[provider])
+		if n := s.providerFailures[provider]; n > 0 {
+			fmt.Fprintf(&b, " %s_failures=%d", provider, n)
+		}
 	}
 	return b.String()
 }

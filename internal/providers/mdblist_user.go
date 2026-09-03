@@ -34,7 +34,7 @@ func (p *MDBListProvider) checkKey(ctx context.Context, key string, index int) e
 func (p *MDBListProvider) fetchUserInfo(ctx context.Context, key string, index int) (*UserInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mdblistBaseURL+"/user", nil)
 	if err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), index, NetTransport, err)
 	}
 	q := req.URL.Query()
 	q.Set("apikey", key)
@@ -43,7 +43,7 @@ func (p *MDBListProvider) fetchUserInfo(ctx context.Context, key string, index i
 
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: err}
+		return nil, newNetworkError(p.Name(), index, NetTransport, err)
 	}
 	defer resp.Body.Close()
 
@@ -62,13 +62,15 @@ func (p *MDBListProvider) fetchUserInfo(ctx context.Context, key string, index i
 			Kind:     KeyExhausted,
 			Detail:   "http status 429",
 		}
+	case resp.StatusCode >= 500:
+		return nil, newNetworkError(p.Name(), index, NetServerFault, fmt.Errorf("http status %d", resp.StatusCode))
 	case resp.StatusCode != http.StatusOK:
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("http status %d", resp.StatusCode)}
+		return nil, newNetworkError(p.Name(), index, NetBadResponse, fmt.Errorf("unexpected http status %d", resp.StatusCode))
 	}
 
 	var info UserInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, &NetworkError{Provider: p.Name(), Err: fmt.Errorf("decode user info: %w", err)}
+		return nil, newNetworkError(p.Name(), index, NetBadResponse, fmt.Errorf("decode user info: %w", err))
 	}
 	return &info, nil
 }

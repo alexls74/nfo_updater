@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"nfo_updater/internal/backup"
 	"nfo_updater/internal/nfo"
@@ -374,11 +373,16 @@ func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show,
 		if !isMDBList || !deps.Breaker.Allowed(p.Name()) {
 			continue
 		}
-		showRes, episodesRes, err := mdb.FetchShowWithEpisodes(ctx, ids)
+		var showRes providers.FetchResult
+		var episodesRes map[string]providers.EpisodeRating
+		err := callProvider(deps, p.Name(), ids, func() error {
+			var e error
+			showRes, episodesRes, e = mdb.FetchShowWithEpisodes(ctx, ids)
+			return e
+		})
 		switch {
 		case err == nil:
-			deps.Breaker.RecordSuccess(p.Name())
-			deps.Stats.IncProviderRequest(p.Name())
+			providerAnswered(deps, p.Name())
 			wanted := enabledSources(deps.Config)
 			filtered := make(providers.FetchResult)
 			for source, v := range showRes {
@@ -389,25 +393,19 @@ func fetchShowRatings(ctx context.Context, deps *Deps, ids providers.IDs) (show,
 			// Всё пришло по сети, поэтому show и fresh здесь совпадают.
 			return filtered, filtered, episodesRes, fetchOK
 		case err == providers.ErrNotFound, err == providers.ErrNoRatings:
-			deps.Breaker.RecordSuccess(p.Name())
-			deps.Stats.IncProviderRequest(p.Name())
+			providerAnswered(deps, p.Name())
 		case err == providers.ErrQuotaExhausted:
 			if !deps.quotaWarned[p.Name()] {
 				deps.quotaWarned[p.Name()] = true
 				deps.Logger.Event("[QUOTA_EXHAUSTED] %s: daily quota exhausted, falling back to cached values for the rest of this run", p.Name())
 			}
 		case providers.IsNetworkError(err):
-			// Та же запись, что и в fetchRatingsWithFallback, и по той же
-			// причине. Без неё сбой на этой ветке не оставлял в логе следа
+			// Запись в лог здесь была и остаётся, только уехала внутрь
+			// callProvider. Без неё сбой на этой ветке не оставлял следа
 			// вовсе: сериал молча уходил на общий путь через OMDb, а прогон
 			// при этом стоил лишних двадцати секунд. Обнаружился он только
 			// по сдвигу ключей в round-robin — цена молчания в этом месте
 			// оказалась выше, чем казалось.
-			deps.Logger.Event("[PROVIDER_ERROR] %s (%s): %v", p.Name(), idsLabel(ids), err)
-			if deps.Breaker.RecordNetworkFailure(p.Name()) {
-				deps.Logger.Event("[PROVIDER_DOWN] %s: tripped after repeated network failures, disabled for the rest of this run", p.Name())
-			}
-			time.Sleep(deps.Breaker.Backoff())
 		}
 		break
 	}
