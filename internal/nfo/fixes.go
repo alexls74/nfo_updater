@@ -124,10 +124,11 @@ func FixEmbyActorOrder(content string) (updated string, changed bool) {
 
 	newBefore := reCreditsOrDirector.ReplaceAllString(before, "")
 	indent := DetectActorIndent(content)
+	eol := DetectLineEnding(content)
 
 	var moved strings.Builder
 	for _, m := range matches {
-		moved.WriteString("\n")
+		moved.WriteString(eol)
 		moved.WriteString(indent)
 		// TrimSpace снимает старый отступ и хвостовой перевод строки —
 		// вместо них ставим свои.

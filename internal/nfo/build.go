@@ -9,8 +9,19 @@ import (
 )
 
 var (
-	reRatingsBlockCut = regexp.MustCompile(`(?s)\n[ \t]*<ratings>.*?</ratings>[ \t]*\n`)
-	reLegacyRatingCut = regexp.MustCompile(`(?s)\n[ \t]*<rating>\s*[0-9]+(?:\.[0-9]+)?\s*</rating>\s*<votes>\s*[0-9,]+\s*</votes>[ \t]*\n`)
+	// Вырезание старых блоков захватывает перевод строки ПЕРЕД блоком
+	// (вместе с отступом), а перевод строки ПОСЛЕ блока оставляет на месте.
+	// Это важно по двум причинам:
+	//   - конец строки бывает и \n, и \r\n (MediaElch пишет CRLF). Раньше
+	//     шаблон требовал строго \n после </ratings>, на CRLF-файле блок
+	//     не находился, новый вставлялся рядом, и блоки размножались;
+	//   - стоящие вплотную блоки (последствие той ошибки) теперь вырезаются
+	//     все за один проход: хвостовой перевод строки не съедается и
+	//     остаётся ведущим для следующего блока.
+	// Заодно ленивый .*? больше не может растянуться до </ratings> другого
+	// блока, если за первым закрывающим тегом нет перевода строки.
+	reRatingsBlockCut = regexp.MustCompile(`(?s)\r?\n[ \t]*<ratings>.*?</ratings>[ \t]*`)
+	reLegacyRatingCut = regexp.MustCompile(`(?s)\r?\n[ \t]*<rating>\s*[0-9]+(?:\.[0-9]+)?\s*</rating>\s*<votes>\s*[0-9,]+\s*</votes>[ \t]*`)
 
 	// Якоря вставки НЕ захватывают пробелы после тега — см. комментарий
 	// к insertAfterAnchor.
@@ -295,22 +306,55 @@ func DetectIndent(content string) string {
 	return defaultIndent
 }
 
+// DetectLineEnding возвращает конец строки, которым написан файл.
+// Хватает одного \r\n: CRLF целиком пишут только Windows-инструменты
+// (MediaElch и т.п.), а файл, где CRLF и LF перемешаны, — это CRLF-файл,
+// в который раньше дописывали строки с LF. Новые вставки делаем CRLF,
+// чтобы не добавлять разнобоя; существующие строки не трогаем.
+func DetectLineEnding(content string) string {
+	if strings.Contains(content, "\r\n") {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+// withLineEnding переводит внутренние переводы строк блока в eol.
+// Блоки собираются с \n; предварительная нормализация защищает от
+// удвоения \r, если в блок уже попал \r\n.
+func withLineEnding(block, eol string) string {
+	block = strings.ReplaceAll(block, "\r\n", "\n")
+	if eol == "\n" {
+		return block
+	}
+	return strings.ReplaceAll(block, "\n", eol)
+}
+
 // insertAfterAnchor вставляет готовый блок сразу после </originaltitle>
-// (или после </title>, если первого в файле нет).
+// (или после </title>, если первого в файле нет). Переводы строк блока
+// приводятся к тем, которыми написан файл.
 func insertAfterAnchor(content, block string) string {
+	eol := DetectLineEnding(content)
+	block = withLineEnding(block, eol)
 	if loc := reOriginalTitleEnd.FindStringIndex(content); loc != nil {
-		return content[:loc[1]] + "\n" + block + content[loc[1]:]
+		return content[:loc[1]] + eol + block + content[loc[1]:]
 	}
 	if loc := reTitleEnd.FindStringIndex(content); loc != nil {
-		return content[:loc[1]] + "\n" + block + content[loc[1]:]
+		return content[:loc[1]] + eol + block + content[loc[1]:]
 	}
-	return strings.TrimRight(content, "\n") + "\n" + block + "\n"
+	return strings.TrimRight(content, "\r\n") + eol + block + eol
 }
 
 func ReplaceOrInsertRatings(content, newBlock string) string {
-	content = reRatingsBlockCut.ReplaceAllString(content, "\n")
-	content = reLegacyRatingCut.ReplaceAllString(content, "\n")
+	content = reRatingsBlockCut.ReplaceAllString(content, "")
+	content = reLegacyRatingCut.ReplaceAllString(content, "")
 	return insertAfterAnchor(content, newBlock)
+}
+
+// countRatingsBlocks — сколько блоков <ratings> в файле. Больше одного
+// бывает только как след прежней ошибки с CRLF; такой файл надо
+// переписать, даже если первый блок совпадает со свежими данными.
+func countRatingsBlocks(content string) int {
+	return len(reRatingsBlockFind.FindAllStringIndex(content, -1))
 }
 
 // ApplyRatingEntries — основной путь записи рейтингов.
@@ -320,7 +364,10 @@ func ApplyRatingEntries(content string, entries []RatingEntry) (updated string, 
 	if len(entries) == 0 {
 		return content, false, nil
 	}
-	if RatingsEqual(ParseRatingsBlock(content), entries) {
+	// Дубли блоков чиним при любом раскладе: ParseRatingsBlock видит
+	// только первый блок, и без этой проверки совпадение с ним оставило
+	// бы остальные в файле навсегда.
+	if countRatingsBlocks(content) <= 1 && RatingsEqual(ParseRatingsBlock(content), entries) {
 		return content, false, nil
 	}
 	block, err := BuildRatingsBlock(entries, DetectIndent(content))
